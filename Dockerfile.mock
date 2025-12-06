@@ -1,0 +1,16 @@
+# Dockerfile for mock GitHub API service
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install Flask
+RUN pip install --no-cache-dir flask
+
+# Copy mock API script
+COPY mock_github_api.py .
+
+# Expose port
+EXPOSE 5000
+
+# Run the mock API
+CMD ["python", "mock_github_api.py"]

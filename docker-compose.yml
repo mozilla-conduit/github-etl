@@ -1,0 +1,57 @@
+services:
+  # Mock GitHub API service for testing without rate limits
+  mock-github-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    ports:
+      - "5000:5000"
+    networks:
+      - github_etl
+
+  # BigQuery emulator for local testing
+  bigquery-emulator:
+    image: ghcr.io/goccy/bigquery-emulator:latest
+    platform: linux/amd64
+    ports:
+      - "9050:9050"
+      - "9060:9060"
+    volumes:
+      - ./data.yml:/data.yml
+    command: |
+      --project=test --data-from-yaml=/data.yml --log-level=debug
+    networks:
+      - github_etl
+
+  # GitHub ETL service
+  github-etl:
+    build: .
+    depends_on:
+      - mock-github-api
+      - bigquery-emulator
+    environment:
+      # GitHub Configuration
+      GITHUB_REPO: "mozilla/firefox"
+      GITHUB_TOKEN: ""  # Not needed for mock API
+
+      # Use mock GitHub API instead of real API
+      GITHUB_API_URL: "http://mock-github-api:5000"
+
+      # BigQuery Configuration
+      BIGQUERY_PROJECT: "test"
+      BIGQUERY_DATASET: "github_etl"
+      BIGQUERY_TABLE: "pull_requests"
+
+      # Point to the BigQuery emulator
+      BIGQUERY_EMULATOR_HOST: "http://bigquery-emulator:9050"
+
+      # Disable authentication for emulator
+      GOOGLE_CLOUD_PROJECT: "test-project"
+    volumes:
+      - ./main.py:/app/main.py
+    networks:
+      - github_etl
+
+networks:
+  github_etl:
+    driver: bridge
