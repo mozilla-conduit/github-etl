@@ -82,12 +82,12 @@ requests in batches of 100:
    - Implements pagination and rate limit handling
    - Fetches all pull requests (open, closed, merged) sorted by creation date
 
-1. **Transform**: Flattens and structures PR data for BigQuery
+2. **Transform**: Flattens and structures PR data for BigQuery
    - Extracts key fields (number, title, state, timestamps, user info)
    - Flattens nested objects (user, head/base branches)
    - Converts arrays (labels, assignees) to JSON strings
 
-1. **Load**: Inserts transformed data into BigQuery
+3. **Load**: Inserts transformed data into BigQuery
    - Uses BigQuery Python client library
    - Adds snapshot_date timestamp to all rows
    - Immediate insertion after each chunk is transformed

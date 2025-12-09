@@ -6,7 +6,6 @@ This script extracts data from GitHub repositories, transforms it,
 and loads it into a BigQuery dataset using chunked processing.
 """
 
-import json
 import logging
 import os
 import requests
@@ -15,7 +14,6 @@ import time
 from datetime import datetime, timezone
 from typing import Iterator, Optional
 from google.cloud import bigquery
-import pprint
 
 
 def setup_logging() -> None:
@@ -187,7 +185,7 @@ def extract_reviewers(
         raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text[:500]}")
 
     reviewers = resp.json()
-    logger.info(f"Extracted {len(reviewers)} reviews for PR #{pr_number}")
+    logger.info(f"Extracted {len(reviewers.get("users", []))} reviews for PR #{pr_number}")
     return reviewers
 
 
@@ -288,7 +286,7 @@ def transform_data(raw_data: list[dict], owner: str, repo: str) -> dict:
                 "pull_request_id": pr.get("number"),
                 "target_repository": "{}/{}".format(owner, repo),
                 "commit_sha": commit.get("sha"),
-                "date_created": commit.get("commit", {}).get("author").get("date"),
+                "date_created": commit.get("commit", {}).get("author", {}).get("date"),
                 "author_username": commit.get("commit", {})
                 .get("author", {})
                 .get("name"),
@@ -305,13 +303,10 @@ def transform_data(raw_data: list[dict], owner: str, repo: str) -> dict:
             transformed_reviewer = {
                 "pull_request_id": pr.get("number"),
                 "target_repository": "{}/{}".format(owner, repo),
-                "date_review_requested": datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%d %H:%M:00"
-                )
-                + "Z",  # TODO Placeholder for actual request date
-                "reviewer_email": None,  # TODO
-                "reviewer_username": review.get("user", {}).get("login"),
-                "status": None,  # TODO
+                "date_review_requested": None, # TODO Placeholder for actual request date
+                "reviewer_email": None,  # TODO Placeholder for reviewer email extraction logic
+                "reviewer_username": review.get("user", {}),
+                "status": None,  # TODO Placeholder for review status extraction logic
             }
             transformed_data["reviewers"].append(transformed_reviewer)
 

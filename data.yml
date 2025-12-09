@@ -24,6 +24,8 @@ projects:
               - name: labels
                 type: STRING
                 mode: REPEATED
+              - name: snapshot_date
+                type: DATE
           - id: commits
             columns:
               - name: pull_request_id
@@ -44,6 +46,8 @@ projects:
                 type: INTEGER
               - name: lines_added
                 type: INTEGER
+              - name: snapshot_date
+                type: DATE
           - id: reviewers
             columns:
               - name: pull_request_id
@@ -58,6 +62,8 @@ projects:
                 type: STRING
               - name: status
                 type: STRING
+              - name: snapshot_date
+                type: DATE
           - id: comments
             columns:
               - name: pull_request_id
@@ -76,3 +82,5 @@ projects:
                 type: INTEGER
               - name: status
                 type: STRING
+              - name: snapshot_date
+                type: DATE

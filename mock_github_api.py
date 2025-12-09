@@ -79,7 +79,7 @@ def generate_mock_commits(pr_number: int, count: int) -> list:
                 "message": f"Mock commit message #{i} for PR #{pr_number}",
                 "author": {
                     "name": f"Author{i % 5}",
-                    "email": f"author{i % 5}",
+                    "email": f"author{i % 5}@example.com",
                     "date": created_date.strftime('%Y-%m-%d %H:%M:00') + "Z",
                 },
             },
