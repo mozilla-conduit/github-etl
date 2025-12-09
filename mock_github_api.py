@@ -21,10 +21,28 @@ def generate_mock_pr(pr_number: int) -> dict:
     states = ["open", "closed"]
     state = random.choice(states)
 
+    # Generate titles with various bug ID formats (about 80% have bug IDs)
+    title_templates = [
+        f"Bug {1800000 + pr_number} - Fix memory leak in component",
+        f"Bug {1900000 + pr_number} - Add new feature for better UX",
+        f"Bug {2000000 + pr_number} - Update dependencies to latest version",
+        f"Bug {1700000 + pr_number} - Refactor rendering pipeline",
+        f"Bug {1600000 + pr_number} - Improve performance of data loading",
+        # Some PRs without bug IDs
+        f"Refactor code structure in module {pr_number}",
+        f"Update documentation for API changes",
+    ]
+
+    # 80% chance of having a bug ID
+    if random.random() < 0.8:
+        title = random.choice(title_templates[:5])
+    else:
+        title = random.choice(title_templates[5:])
+
     return {
         "number": pr_number,
         "id": 1000000 + pr_number,
-        "title": f"Mock PR #{pr_number}: Add new feature",
+        "title": title,
         "state": state,
         "created_at": created_date.strftime('%Y-%m-%d %H:%M:00') + "Z",
         "updated_at": updated_date.strftime('%Y-%m-%d %H:%M:00') + "Z",

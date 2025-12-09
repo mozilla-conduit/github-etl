@@ -8,12 +8,16 @@ and loads it into a BigQuery dataset using chunked processing.
 
 import logging
 import os
+import re
 import requests
 import sys
 import time
 from datetime import datetime, timezone
 from typing import Iterator, Optional
 from google.cloud import bigquery
+
+
+BUG_RE = re.compile(r"\b(?:bug|b=)\s*#?(\d+)\b", re.I)
 
 
 def setup_logging() -> None:
@@ -185,7 +189,9 @@ def extract_reviewers(
         raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text[:500]}")
 
     reviewers = resp.json()
-    logger.info(f"Extracted {len(reviewers.get("users", []))} reviews for PR #{pr_number}")
+    logger.info(
+        f"Extracted {len(reviewers.get('users', []))} reviews for PR #{pr_number}"
+    )
     return reviewers
 
 
@@ -264,13 +270,17 @@ def transform_data(raw_data: list[dict], owner: str, repo: str) -> dict:
     for pr in raw_data:
         # Extract and flatten pull request data
         logger.info(f"Transforming PR #{pr.get('number')}")
+
+        matches = [m for m in BUG_RE.finditer(pr.get("title", "")) if int(m.group(1)) < 100000000]
+        bug_id = int(matches[0].group(1)) if matches else None
+
         transformed_pr = {
             "pull_request_id": pr.get("number"),
             "current_status": pr.get("state"),
             "date_created": pr.get("created_at"),
             "date_modified": pr.get("updated_at"),
             "target_repository": "{}/{}".format(owner, repo),
-            "bug_id": None,  # TODO Placeholder for bug ID extraction logic
+            "bug_id": bug_id,
             "date_landed": pr.get("merged_at"),
             "date_approved": None,  # TODO Placeholder for approval date extraction logic
             "labels": [label.get("name") for label in pr.get("labels", [])]
@@ -303,7 +313,7 @@ def transform_data(raw_data: list[dict], owner: str, repo: str) -> dict:
             transformed_reviewer = {
                 "pull_request_id": pr.get("number"),
                 "target_repository": "{}/{}".format(owner, repo),
-                "date_review_requested": None, # TODO Placeholder for actual request date
+                "date_review_requested": None,  # TODO Placeholder for actual request date
                 "reviewer_email": None,  # TODO Placeholder for reviewer email extraction logic
                 "reviewer_username": review.get("user", {}),
                 "status": None,  # TODO Placeholder for review status extraction logic
