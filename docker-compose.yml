@@ -31,7 +31,7 @@ services:
       - bigquery-emulator
     environment:
       # GitHub Configuration
-      GITHUB_REPO: "mozilla/firefox"
+      GITHUB_REPOS: "mozilla/firefox,mozilla/firefox-android"
       GITHUB_TOKEN: ""  # Not needed for mock API
 
       # Use mock GitHub API instead of real API
@@ -40,7 +40,6 @@ services:
       # BigQuery Configuration
       BIGQUERY_PROJECT: "test"
       BIGQUERY_DATASET: "github_etl"
-      BIGQUERY_TABLE: "pull_requests"
 
       # Point to the BigQuery emulator
       BIGQUERY_EMULATOR_HOST: "http://bigquery-emulator:9050"

@@ -15,6 +15,8 @@ import time
 from datetime import datetime, timezone
 from typing import Iterator, Optional
 from google.cloud import bigquery
+from google.api_core.client_options import ClientOptions
+from google.auth.credentials import AnonymousCredentials
 
 
 BUG_RE = re.compile(r"\b(?:bug|b=)\s*#?(\d+)\b", re.I)
@@ -31,7 +33,6 @@ def setup_logging() -> None:
 
 def extract_pull_requests(
     session: requests.Session,
-    owner: str,
     repo: str,
     chunk_size: int = 100,
     github_api_url: Optional[str] = None,
@@ -43,7 +44,6 @@ def extract_pull_requests(
 
     Args:
         session: Authenticated requests session
-        owner: GitHub repository owner
         repo: GitHub repository name
         chunk_size: Number of PRs to yield per chunk (default: 100)
         github_api_url: Optional custom GitHub API URL (for testing/mocking)
@@ -56,7 +56,7 @@ def extract_pull_requests(
 
     # Support custom API URL for mocking/testing
     api_base = github_api_url or "https://api.github.com"
-    base_url = f"{api_base}/repos/{owner}/{repo}/pulls"
+    base_url = f"{api_base}/repos/{repo}/pulls"
     params = {
         "state": "all",
         "per_page": chunk_size,
@@ -90,13 +90,13 @@ def extract_pull_requests(
                 if not pr_number:
                     continue
                 pr["commit_data"] = extract_commits(
-                    session, owner, repo, pr_number, github_api_url
+                    session, repo, pr_number, github_api_url
                 )
                 pr["reviewer_data"] = extract_reviewers(
-                    session, owner, repo, pr_number, github_api_url
+                    session, repo, pr_number, github_api_url
                 )
                 pr["comment_data"] = extract_comments(
-                    session, owner, repo, pr_number, github_api_url
+                    session, repo, pr_number, github_api_url
                 )
 
             yield batch
@@ -113,7 +113,6 @@ def extract_pull_requests(
 
 def extract_commits(
     session: requests.Session,
-    owner: str,
     repo: str,
     pr_number: int,
     github_api_url: Optional[str] = None,
@@ -123,7 +122,6 @@ def extract_commits(
 
     Args:
         session: Authenticated requests session
-        owner: GitHub repository owner
         repo: GitHub repository name
         pr_number: Pull request number
         github_api_url: Optional custom GitHub API URL (for testing/mocking)
@@ -135,7 +133,7 @@ def extract_commits(
 
     # Support custom API URL for mocking/testing
     api_base = github_api_url or "https://api.github.com"
-    commits_url = f"{api_base}/repos/{owner}/{repo}/pulls/{pr_number}/commits"
+    commits_url = f"{api_base}/repos/{repo}/pulls/{pr_number}/commits"
 
     logger.info(f"Commits URL: {commits_url}")
 
@@ -153,7 +151,6 @@ def extract_commits(
 
 def extract_reviewers(
     session: requests.Session,
-    owner: str,
     repo: str,
     pr_number: int,
     github_api_url: Optional[str] = None,
@@ -163,7 +160,6 @@ def extract_reviewers(
 
     Args:
         session: Authenticated requests session
-        owner: GitHub repository owner
         repo: GitHub repository name
         pr_number: Pull request number
         github_api_url: Optional custom GitHub API URL (for testing/mocking)
@@ -176,7 +172,7 @@ def extract_reviewers(
     # Support custom API URL for mocking/testing
     api_base = github_api_url or "https://api.github.com"
     reviewers_url = (
-        f"{api_base}/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers"
+        f"{api_base}/repos/{repo}/pulls/{pr_number}/requested_reviewers"
     )
 
     logger.info(f"Reviewers URL: {reviewers_url}")
@@ -197,7 +193,6 @@ def extract_reviewers(
 
 def extract_comments(
     session: requests.Session,
-    owner: str,
     repo: str,
     pr_number: int,
     github_api_url: Optional[str] = None,
@@ -207,7 +202,6 @@ def extract_comments(
 
     Args:
         session: Authenticated requests session
-        owner: GitHub repository owner
         repo: GitHub repository name
         pr_number: Pull request number
         github_api_url: Optional custom GitHub API URL (for testing/mocking)
@@ -219,7 +213,7 @@ def extract_comments(
 
     # Support custom API URL for mocking/testing
     api_base = github_api_url or "https://api.github.com"
-    comments_url = f"{api_base}/repos/{owner}/{repo}/issues/{pr_number}/comments"
+    comments_url = f"{api_base}/repos/{repo}/issues/{pr_number}/comments"
 
     logger.info(f"Comments URL: {comments_url}")
 
@@ -247,7 +241,7 @@ def sleep_for_rate_limit(resp):
         time.sleep(sleep_time)
 
 
-def transform_data(raw_data: list[dict], owner: str, repo: str) -> dict:
+def transform_data(raw_data: list[dict], repo: str) -> dict:
     """
     Transform GitHub pull request data into BigQuery-compatible format.
 
@@ -279,7 +273,7 @@ def transform_data(raw_data: list[dict], owner: str, repo: str) -> dict:
             "current_status": pr.get("state"),
             "date_created": pr.get("created_at"),
             "date_modified": pr.get("updated_at"),
-            "target_repository": "{}/{}".format(owner, repo),
+            "target_repository": repo,
             "bug_id": bug_id,
             "date_landed": pr.get("merged_at"),
             "date_approved": None,  # TODO Placeholder for approval date extraction logic
@@ -294,7 +288,7 @@ def transform_data(raw_data: list[dict], owner: str, repo: str) -> dict:
         for commit in pr["commit_data"]:
             transformed_commit = {
                 "pull_request_id": pr.get("number"),
-                "target_repository": "{}/{}".format(owner, repo),
+                "target_repository": repo,
                 "commit_sha": commit.get("sha"),
                 "date_created": commit.get("commit", {}).get("author", {}).get("date"),
                 "author_username": commit.get("commit", {})
@@ -312,7 +306,7 @@ def transform_data(raw_data: list[dict], owner: str, repo: str) -> dict:
         for review in pr["reviewer_data"]["users"]:
             transformed_reviewer = {
                 "pull_request_id": pr.get("number"),
-                "target_repository": "{}/{}".format(owner, repo),
+                "target_repository": repo,
                 "date_review_requested": None,  # TODO Placeholder for actual request date
                 "reviewer_email": None,  # TODO Placeholder for reviewer email extraction logic
                 "reviewer_username": review.get("user", {}),
@@ -325,7 +319,7 @@ def transform_data(raw_data: list[dict], owner: str, repo: str) -> dict:
         for comment in pr["comment_data"]:
             transformed_comment = {
                 "pull_request_id": pr.get("number"),
-                "target_repository": "{}/{}".format(owner, repo),
+                "target_repository": repo,
                 "comment_id": comment.get("id"),
                 "date_created": comment.get("created_at"),
                 "author_email": None,  # TODO
@@ -347,7 +341,6 @@ def transform_data(raw_data: list[dict], owner: str, repo: str) -> dict:
 def load_data(
     client: bigquery.Client,
     dataset_id: str,
-    table_id: str,
     transformed_data: dict,
 ) -> None:
     """
@@ -356,7 +349,6 @@ def load_data(
     Args:
         client: BigQuery client instance
         dataset_id: BigQuery dataset ID
-        table_id: BigQuery table ID
         transformed_data: List of transformed pull request dictionaries
     """
     logger = logging.getLogger(__name__)
@@ -368,14 +360,13 @@ def load_data(
     # Add snapshot date to all rows
     snapshot_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    for table in transformed_data.keys():
-        load_table_data = transformed_data[table]
+    for table, load_table_data in transformed_data.items():
         if not load_table_data:
             logger.warning(f"No data to load for table {table}, skipping")
             continue
 
         logger.info(
-            f"Starting data loading for {len(load_table_data)} rows to {dataset_id}.{table_id}"
+            f"Starting data loading for {len(load_table_data)} rows to {dataset_id}.{table}"
         )
 
         # Add snapshot date to each row
@@ -410,89 +401,77 @@ def main() -> int:
     setup_logging()
     logger = logging.getLogger(__name__)
 
-    try:
-        logger.info("Starting GitHub ETL process with chunked processing")
+    logger.info("Starting GitHub ETL process with chunked processing")
 
-        # Read GitHub configuration
-        github_repo = os.environ.get("GITHUB_REPO")
-        if not github_repo:
-            raise SystemExit(
-                "Environment variable GITHUB_REPO is required (format: 'owner/repo')"
-            )
-
-        try:
-            owner, repo = github_repo.split("/", 1)
-        except ValueError:
-            raise SystemExit(
-                "Environment variable GITHUB_REPO must look like 'owner/repo'"
-            )
-
-        github_token = os.environ.get("GITHUB_TOKEN")
-        if not github_token:
-            print(
-                "Warning: No token provided. You will hit very low rate limits and private repos won't work.",
-                file=sys.stderr,
-            )
-
-        # Read BigQuery configuration
-        bigquery_project = os.environ.get("BIGQUERY_PROJECT")
-        bigquery_dataset = os.environ.get("BIGQUERY_DATASET")
-        bigquery_table = os.environ.get("BIGQUERY_TABLE", "pull_requests")
-
-        if not bigquery_project:
-            raise SystemExit("Environment variable BIGQUERY_PROJECT is required")
-        if not bigquery_dataset:
-            raise SystemExit("Environment variable BIGQUERY_DATASET is required")
-
-        # Setup GitHub session
-        session = requests.Session()
-        session.headers.update(
-            {
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "gh-pr-scraper/1.0 (+https://api.github.com)",
-            }
+    github_token = os.environ.get("GITHUB_TOKEN")
+    if not github_token:
+        print(
+            "Warning: No token provided. You will hit very low rate limits and private repos won't work.",
+            file=sys.stderr,
         )
 
-        if github_token:
-            session.headers["Authorization"] = f"Bearer {github_token}"
+    # Read BigQuery configuration
+    bigquery_project = os.environ.get("BIGQUERY_PROJECT")
+    bigquery_dataset = os.environ.get("BIGQUERY_DATASET")
 
-        # Support custom GitHub API URL for testing/mocking
-        github_api_url = os.environ.get("GITHUB_API_URL")
-        if github_api_url:
-            logger.info(f"Using custom GitHub API URL: {github_api_url}")
+    if not bigquery_project:
+        raise SystemExit("Environment variable BIGQUERY_PROJECT is required")
+    if not bigquery_dataset:
+        raise SystemExit("Environment variable BIGQUERY_DATASET is required")
 
-        # Setup BigQuery client
-        # Support BigQuery emulator for local testing
-        emulator_host = os.environ.get("BIGQUERY_EMULATOR_HOST")
-        if emulator_host:
-            logger.info(f"Using BigQuery emulator at {emulator_host}")
-            from google.api_core.client_options import ClientOptions
-            from google.auth.credentials import AnonymousCredentials
+    # Setup GitHub session
+    session = requests.Session()
+    session.headers.update(
+        {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "gh-pr-scraper/1.0 (+https://api.github.com)",
+        }
+    )
 
-            bigquery_client = bigquery.Client(
-                project=bigquery_project,
-                client_options=ClientOptions(api_endpoint=emulator_host),
-                credentials=AnonymousCredentials(),
-            )
-        else:
-            bigquery_client = bigquery.Client(project=bigquery_project)
+    if github_token:
+        session.headers["Authorization"] = f"Bearer {github_token}"
 
-        # Process data in chunks
-        total_processed = 0
-        chunk_count = 0
+    # Support custom GitHub API URL for testing/mocking
+    github_api_url = os.environ.get("GITHUB_API_URL")
+    if github_api_url:
+        logger.info(f"Using custom GitHub API URL: {github_api_url}")
 
-        for chunk in extract_pull_requests(
-            session, owner, repo, chunk_size=100, github_api_url=github_api_url
+    # Setup BigQuery client
+    # Support BigQuery emulator for local testing
+    emulator_host = os.environ.get("BIGQUERY_EMULATOR_HOST")
+    if emulator_host:
+        logger.info(f"Using BigQuery emulator at {emulator_host}")
+        bigquery_client = bigquery.Client(
+            project=bigquery_project,
+            client_options=ClientOptions(api_endpoint=emulator_host),
+            credentials=AnonymousCredentials(),
+        )
+    else:
+        bigquery_client = bigquery.Client(project=bigquery_project)
+
+    # Read GitHub repository configuration
+    github_repos = os.getenv("GITHUB_REPOS").split(",")
+    if not github_repos:
+        raise SystemExit(
+            "Environment variable GITHUB_REPOS is required (format: 'owner/repo,owner/repo')"
+        )
+
+    total_processed = 0
+
+    for repo in github_repos:
+        for chunk_count, chunk in enumerate(
+            extract_pull_requests(
+                session, repo, chunk_size=100, github_api_url=github_api_url
+            ), start=1
         ):
-            chunk_count += 1
             logger.info(f"Processing chunk {chunk_count} with {len(chunk)} PRs")
 
             # Transform
-            transformed_data = transform_data(chunk, owner, repo)
+            transformed_data = transform_data(chunk, repo)
 
             # Load
             load_data(
-                bigquery_client, bigquery_dataset, bigquery_table, transformed_data
+                bigquery_client, bigquery_dataset, transformed_data
             )
 
             total_processed += len(chunk)
@@ -500,14 +479,9 @@ def main() -> int:
                 f"Completed chunk {chunk_count}. Total PRs processed: {total_processed}"
             )
 
-        logger.info(
-            f"GitHub ETL process completed successfully. Total PRs processed: {total_processed} in {chunk_count} chunks"
-        )
-        return 0
-
-    except Exception as e:
-        logger.error(f"ETL process failed: {e}")
-        return 1
+    logger.info(
+        f"GitHub ETL process completed successfully. Total PRs processed: {total_processed} in {chunk_count} chunks"
+    )
 
 
 if __name__ == "__main__":

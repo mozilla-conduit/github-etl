@@ -37,11 +37,10 @@ docker build -t github-etl .
 
 ```bash
 docker run --rm \
-  -e GITHUB_REPO="mozilla/firefox" \
+  -e GITHUB_REPOS="mozilla/firefox" \
   -e GITHUB_TOKEN="your_github_token" \
   -e BIGQUERY_PROJECT="your-gcp-project" \
   -e BIGQUERY_DATASET="your_dataset" \
-  -e BIGQUERY_TABLE="pull_requests" \
   -e GOOGLE_APPLICATION_CREDENTIALS="/path/to/credentials.json" \
   -v /local/path/to/credentials.json:/path/to/credentials.json \
   github-etl
@@ -51,11 +50,10 @@ docker run --rm \
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GITHUB_REPO` | Yes | - | Repository in format "owner/repo" (e.g., "mozilla/firefox") |
+| `GITHUB_REPOS` | Yes | - | Comma separated epositories in format "owner/repo" (e.g., "mozilla/firefox") |
 | `GITHUB_TOKEN` | No | - | GitHub Personal Access Token (recommended to avoid rate limits) |
 | `BIGQUERY_PROJECT` | Yes | - | Google Cloud Project ID |
 | `BIGQUERY_DATASET` | Yes | - | BigQuery dataset ID |
-| `BIGQUERY_TABLE` | No | `pull_requests` | BigQuery table name |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Yes* | - | Path to GCP service account JSON file (*or use Workload Identity) |
 
 ## Architecture
@@ -170,12 +168,10 @@ authentication methods:
 Set up environment variables and run the script:
 
 ```bash
-export GITHUB_REPO="mozilla/firefox"
+export GITHUB_REPOS="mozilla/firefox"
 export GITHUB_TOKEN="your_github_token"
 export BIGQUERY_PROJECT="your-gcp-project"
 export BIGQUERY_DATASET="your_dataset"
-export BIGQUERY_TABLE="pull_requests"
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/credentials.json"
 
 python3 main.py
 ```

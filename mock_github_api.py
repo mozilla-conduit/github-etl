@@ -13,6 +13,9 @@ import random
 app = Flask(__name__)
 
 
+DATE_FORMAT = "%Y-%m-%d %H:%M:00Z"
+
+
 def generate_mock_pr(pr_number: int) -> dict:
     """Generate a mock pull request object."""
     created_date = datetime.now(timezone.utc) - timedelta(days=random.randint(1, 365))
@@ -44,10 +47,10 @@ def generate_mock_pr(pr_number: int) -> dict:
         "id": 1000000 + pr_number,
         "title": title,
         "state": state,
-        "created_at": created_date.strftime('%Y-%m-%d %H:%M:00') + "Z",
-        "updated_at": updated_date.strftime('%Y-%m-%d %H:%M:00') + "Z",
-        "closed_at": updated_date.strftime('%Y-%m-%d %H:%M:00') + "Z" if state == "closed" else None,
-        "merged_at": updated_date.strftime('%Y-%m-%d %H:%M:00') + "Z" if state == "closed" and random.random() > 0.3 else None,
+        "created_at": created_date.strftime(DATE_FORMAT),
+        "updated_at": updated_date.strftime(DATE_FORMAT),
+        "closed_at": updated_date.strftime(DATE_FORMAT) if state == "closed" else None,
+        "merged_at": updated_date.strftime(DATE_FORMAT) if state == "closed" and random.random() > 0.3 else None,
         "user": {
             "login": f"user{pr_number % 10}",
             "id": 5000 + (pr_number % 10),
@@ -98,7 +101,7 @@ def generate_mock_commits(pr_number: int, count: int) -> list:
                 "author": {
                     "name": f"Author{i % 5}",
                     "email": f"author{i % 5}@example.com",
-                    "date": created_date.strftime('%Y-%m-%d %H:%M:00') + "Z",
+                    "date": created_date.strftime(DATE_FORMAT),
                 },
             },
             "author": {
@@ -123,8 +126,8 @@ def generate_mock_comments(pr_number: int, count: int) -> list:
                 "login": f"commenter{i % 5}",
                 "id": 6000 + (i % 5),
             },
-            "created_at": created_date.strftime('%Y-%m-%d %H:%M:00') + "Z",
-            "updated_at": created_date.strftime('%Y-%m-%d %H:%M:00') + "Z",
+            "created_at": created_date.strftime(DATE_FORMAT),
+            "updated_at": created_date.strftime(DATE_FORMAT),
             "html_url": f"",
         })
 
