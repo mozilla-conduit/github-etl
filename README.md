@@ -55,6 +55,9 @@ docker run --rm \
 | `BIGQUERY_PROJECT` | Yes | - | Google Cloud Project ID |
 | `BIGQUERY_DATASET` | Yes | - | BigQuery dataset ID |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Yes* | - | Path to GCP service account JSON file (*or use Workload Identity) |
+| `FETCH_COMMITS` | No | true | Whether to fetch commit data for each PR (set to "false" to reduce API calls) |
+| `FETCH_REVIEWERS` | No | true | Whether to fetch reviewer data for each PR (set to "false" to reduce API calls) |
+| `FETCH_COMMENTS` | No | true | Whether to fetch comment data for each PR (set to "false" to reduce API calls) |
 
 ## Architecture
 
@@ -96,6 +99,27 @@ requests in batches of 100:
 - Incremental progress visibility
 - Early failure detection
 - Supports streaming data pipelines
+
+### Performance Optimization
+
+By default, the ETL fetches commits, reviewers, and comments for each pull request, which creates an N+1 query pattern. For 250 PRs, this results in 250 + (250×3) = 1000 API calls.
+
+To improve performance when this additional data is not needed, you can disable fetching of specific data types using environment variables:
+
+```bash
+# Disable all extra data fetching (only fetch PR metadata)
+FETCH_COMMITS=false FETCH_REVIEWERS=false FETCH_COMMENTS=false python3 main.py
+
+# Disable only commits and comments (still fetch reviewers)
+FETCH_COMMITS=false FETCH_COMMENTS=false python3 main.py
+```
+
+This can significantly reduce:
+- **API calls**: From 1000 to 250 for 250 PRs (when all extras are disabled)
+- **Processing time**: Proportional to the reduction in API calls
+- **Rate limit pressure**: Fewer calls mean you stay within GitHub's rate limits longer
+
+The corresponding BigQuery tables will still be populated, but with empty arrays for disabled data types.
 
 ## BigQuery Table Schema
 

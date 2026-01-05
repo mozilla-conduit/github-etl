@@ -36,6 +36,9 @@ def extract_pull_requests(
     repo: str,
     chunk_size: int = 100,
     github_api_url: Optional[str] = None,
+    fetch_commits: bool = True,
+    fetch_reviewers: bool = True,
+    fetch_comments: bool = True,
 ) -> Iterator[list[dict]]:
     """
     Extract data from GitHub repositories in chunks.
@@ -47,6 +50,9 @@ def extract_pull_requests(
         repo: GitHub repository name
         chunk_size: Number of PRs to yield per chunk (default: 100)
         github_api_url: Optional custom GitHub API URL (for testing/mocking)
+        fetch_commits: Whether to fetch commit data for each PR (default: True)
+        fetch_reviewers: Whether to fetch reviewer data for each PR (default: True)
+        fetch_comments: Whether to fetch comment data for each PR (default: True)
 
     Yields:
         List of pull request dictionaries (up to chunk_size items)
@@ -89,15 +95,28 @@ def extract_pull_requests(
                 pr_number = pr.get("number")
                 if not pr_number:
                     continue
-                pr["commit_data"] = extract_commits(
-                    session, repo, pr_number, github_api_url
-                )
-                pr["reviewer_data"] = extract_reviewers(
-                    session, repo, pr_number, github_api_url
-                )
-                pr["comment_data"] = extract_comments(
-                    session, repo, pr_number, github_api_url
-                )
+                
+                # Conditionally fetch additional data to avoid N+1 query pattern
+                if fetch_commits:
+                    pr["commit_data"] = extract_commits(
+                        session, repo, pr_number, github_api_url
+                    )
+                else:
+                    pr["commit_data"] = []
+                
+                if fetch_reviewers:
+                    pr["reviewer_data"] = extract_reviewers(
+                        session, repo, pr_number, github_api_url
+                    )
+                else:
+                    pr["reviewer_data"] = {"users": [], "teams": []}
+                
+                if fetch_comments:
+                    pr["comment_data"] = extract_comments(
+                        session, repo, pr_number, github_api_url
+                    )
+                else:
+                    pr["comment_data"] = []
 
             yield batch
 
@@ -456,12 +475,26 @@ def main() -> int:
             "Environment variable GITHUB_REPOS is required (format: 'owner/repo,owner/repo')"
         )
 
+    # Read optional data fetching configuration (defaults to True for backward compatibility)
+    fetch_commits = os.getenv("FETCH_COMMITS", "true").lower() in ("true", "1", "yes")
+    fetch_reviewers = os.getenv("FETCH_REVIEWERS", "true").lower() in ("true", "1", "yes")
+    fetch_comments = os.getenv("FETCH_COMMENTS", "true").lower() in ("true", "1", "yes")
+    
+    if not fetch_commits:
+        logger.info("Commit data fetching is disabled")
+    if not fetch_reviewers:
+        logger.info("Reviewer data fetching is disabled")
+    if not fetch_comments:
+        logger.info("Comment data fetching is disabled")
+
     total_processed = 0
 
     for repo in github_repos:
         for chunk_count, chunk in enumerate(
             extract_pull_requests(
-                session, repo, chunk_size=100, github_api_url=github_api_url
+                session, repo, chunk_size=100, github_api_url=github_api_url,
+                fetch_commits=fetch_commits, fetch_reviewers=fetch_reviewers,
+                fetch_comments=fetch_comments
             ), start=1
         ):
             logger.info(f"Processing chunk {chunk_count} with {len(chunk)} PRs")
