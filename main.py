@@ -110,8 +110,12 @@ def extract_pull_requests(
         parsed_url = urlparse(next_url)
         query_params = parse_qs(parsed_url.query)
         # Update only the page parameter, preserving other params
-        if "page" in query_params:
-            params["page"] = int(query_params["page"][0])
+        if "page" in query_params and query_params["page"]:
+            try:
+                params["page"] = int(query_params["page"][0])
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Invalid page parameter in next URL: {e}, stopping pagination")
+                break
         else:
             # If no page parameter, this is unexpected - log and stop pagination
             logger.warning("No page parameter in next URL, stopping pagination")
