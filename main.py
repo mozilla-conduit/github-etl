@@ -469,11 +469,12 @@ def main() -> int:
         bigquery_client = bigquery.Client(project=bigquery_project)
 
     # Read GitHub repository configuration
-    github_repos = os.getenv("GITHUB_REPOS").split(",")
-    if not github_repos:
+    github_repos_env = os.getenv("GITHUB_REPOS")
+    if not github_repos_env:
         raise SystemExit(
             "Environment variable GITHUB_REPOS is required (format: 'owner/repo,owner/repo')"
         )
+    github_repos = github_repos_env.split(",")
 
     # Read optional data fetching configuration (defaults to True for backward compatibility)
     fetch_commits = os.getenv("FETCH_COMMITS", "true").lower() in ("true", "1", "yes")
