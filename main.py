@@ -14,6 +14,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from typing import Iterator, Optional
+from urllib.parse import parse_qs, urlparse
 from google.cloud import bigquery
 from google.api_core.client_options import ClientOptions
 from google.auth.credentials import AnonymousCredentials
@@ -105,8 +106,12 @@ def extract_pull_requests(
         next_url = resp.links.get("next", {}).get("url")
         if not next_url or len(batch) == 0:
             break
-        # After first request, subsequent 'next' URLs already contain params
-        base_url, params = next_url, None
+        # Parse the next URL and extract the page parameter
+        parsed_url = urlparse(next_url)
+        query_params = parse_qs(parsed_url.query)
+        # Update only the page parameter, preserving other params
+        if "page" in query_params:
+            params["page"] = query_params["page"][0]
 
     logger.info(f"Data extraction completed. Total PRs: {total}, Pages: {pages}")
 
