@@ -173,7 +173,7 @@ def extract_reviewers(
     repo: str,
     pr_number: int,
     github_api_url: Optional[str] = None,
-) -> list[dict]:
+) -> dict:
     """
     Extract reviewers for a specific pull request.
 
@@ -183,7 +183,7 @@ def extract_reviewers(
         pr_number: Pull request number
         github_api_url: Optional custom GitHub API URL (for testing/mocking)
     Returns:
-        List of reviewer dictionaries for the pull request
+        Dictionary with 'users' and 'teams' keys containing reviewer data
     """
     logger = logging.getLogger(__name__)
     logger.info(f"Extracting reviews for PR #{pr_number}")
