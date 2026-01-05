@@ -111,7 +111,11 @@ def extract_pull_requests(
         query_params = parse_qs(parsed_url.query)
         # Update only the page parameter, preserving other params
         if "page" in query_params:
-            params["page"] = query_params["page"][0]
+            params["page"] = int(query_params["page"][0])
+        else:
+            # If no page parameter, this is unexpected - log and stop pagination
+            logger.warning("No page parameter in next URL, stopping pagination")
+            break
 
     logger.info(f"Data extraction completed. Total PRs: {total}, Pages: {pages}")
 
