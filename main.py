@@ -112,7 +112,12 @@ def extract_pull_requests(
         # Update only the page parameter, preserving other params
         if "page" in query_params and query_params["page"]:
             try:
-                params["page"] = int(query_params["page"][0])
+                page_num = int(query_params["page"][0])
+                if page_num > 0:
+                    params["page"] = page_num
+                else:
+                    logger.warning(f"Invalid page number {page_num} in next URL, stopping pagination")
+                    break
             except (ValueError, IndexError) as e:
                 logger.warning(f"Invalid page parameter in next URL: {e}, stopping pagination")
                 break
