@@ -50,7 +50,7 @@ docker run --rm \
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GITHUB_REPOS` | Yes | - | Comma separated epositories in format "owner/repo" (e.g., "mozilla/firefox") |
+| `GITHUB_REPOS` | Yes | - | Comma separated repositories in format "owner/repo" (e.g., "mozilla/firefox") |
 | `GITHUB_TOKEN` | No | - | GitHub Personal Access Token (recommended to avoid rate limits) |
 | `BIGQUERY_PROJECT` | Yes | - | Google Cloud Project ID |
 | `BIGQUERY_DATASET` | Yes | - | BigQuery dataset ID |
@@ -96,47 +96,6 @@ requests in batches of 100:
 - Incremental progress visibility
 - Early failure detection
 - Supports streaming data pipelines
-
-## BigQuery Table Schema
-
-Before running the ETL, create a BigQuery table with the following schema:
-
-```sql
-CREATE TABLE `your-project.your_dataset.pull_requests` (
-  pr_number INT64,
-  pr_id INT64,
-  title STRING,
-  state STRING,
-  created_at TIMESTAMP,
-  updated_at TIMESTAMP,
-  closed_at TIMESTAMP,
-  merged_at TIMESTAMP,
-  user_login STRING,
-  user_id INT64,
-  body STRING,
-  html_url STRING,
-  head_ref STRING,
-  head_sha STRING,
-  base_ref STRING,
-  base_sha STRING,
-  draft BOOL,
-  merged BOOL,
-  mergeable BOOL,
-  mergeable_state STRING,
-  comments INT64,
-  review_comments INT64,
-  commits INT64,
-  additions INT64,
-  deletions INT64,
-  changed_files INT64,
-  labels STRING,
-  assignees STRING,
-  snapshot_date DATE
-);
-```
-
-Alternatively, you can let BigQuery auto-detect the schema on first insert
-by enabling schema auto-detection.
 
 ## Authentication
 
@@ -197,7 +156,7 @@ This setup includes:
 - **Mock GitHub API**: Generates 250 sample pull requests
 - **BigQuery Emulator**: Local BigQuery instance for testing
 - **ETL Service**: Configured to use both mock services
-
+  
 ### Adding Dependencies
 
 Add new Python packages to `requirements.txt` and rebuild the Docker image.

@@ -12,6 +12,7 @@ import re
 import requests
 import sys
 import time
+from typing import List
 from datetime import datetime, timezone
 from typing import Iterator, Optional
 from urllib.parse import parse_qs, urlparse
@@ -37,7 +38,7 @@ def extract_pull_requests(
     repo: str,
     chunk_size: int = 100,
     github_api_url: Optional[str] = None,
-) -> Iterator[list[dict]]:
+) -> Iterator[List[dict]]:
     """
     Extract data from GitHub repositories in chunks.
 
@@ -70,12 +71,16 @@ def extract_pull_requests(
 
     while True:
         resp = session.get(base_url, params=params)
-        if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
+        if (
+            resp.status_code == 403
+            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == "0"
+        ):
             sleep_for_rate_limit(resp)
             # retry same URL/params after sleeping
             continue
         if resp.status_code != 200:
-            raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text[:500]}")
+            error_text = resp.text[:500] if resp.text else "No response text"
+            raise SystemExit(f"GitHub API error {resp.status_code}: {error_text}")
 
         batch = resp.json()
         pages += 1
@@ -134,7 +139,7 @@ def extract_commits(
     repo: str,
     pr_number: int,
     github_api_url: Optional[str] = None,
-) -> list[dict]:
+) -> List[dict]:
     """
     Extract commits for a specific pull request.
 
@@ -156,7 +161,10 @@ def extract_commits(
     logger.info(f"Commits URL: {commits_url}")
 
     resp = session.get(commits_url)
-    if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
+    if (
+        resp.status_code == 403
+        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == "0"
+    ):
         sleep_for_rate_limit(resp)
         resp = session.get(commits_url)
     if resp.status_code != 200:
@@ -172,7 +180,7 @@ def extract_reviewers(
     repo: str,
     pr_number: int,
     github_api_url: Optional[str] = None,
-) -> list[dict]:
+) -> List[dict]:
     """
     Extract reviewers for a specific pull request.
 
@@ -189,14 +197,15 @@ def extract_reviewers(
 
     # Support custom API URL for mocking/testing
     api_base = github_api_url or "https://api.github.com"
-    reviewers_url = (
-        f"{api_base}/repos/{repo}/pulls/{pr_number}/requested_reviewers"
-    )
+    reviewers_url = f"{api_base}/repos/{repo}/pulls/{pr_number}/requested_reviewers"
 
     logger.info(f"Reviewers URL: {reviewers_url}")
 
     resp = session.get(reviewers_url)
-    if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
+    if (
+        resp.status_code == 403
+        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == "0"
+    ):
         sleep_for_rate_limit(resp)
         resp = session.get(reviewers_url)
     if resp.status_code != 200:
@@ -214,7 +223,7 @@ def extract_comments(
     repo: str,
     pr_number: int,
     github_api_url: Optional[str] = None,
-) -> list[dict]:
+) -> List[dict]:
     """
     Extract comments for a specific pull request.
 
@@ -236,7 +245,10 @@ def extract_comments(
     logger.info(f"Comments URL: {comments_url}")
 
     resp = session.get(comments_url)
-    if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
+    if (
+        resp.status_code == 403
+        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == "0"
+    ):
         sleep_for_rate_limit(resp)
         resp = session.get(comments_url)
     if resp.status_code != 200:
@@ -259,7 +271,7 @@ def sleep_for_rate_limit(resp):
         time.sleep(sleep_time)
 
 
-def transform_data(raw_data: list[dict], repo: str) -> dict:
+def transform_data(raw_data: List[dict], repo: str) -> dict:
     """
     Transform GitHub pull request data into BigQuery-compatible format.
 
@@ -283,7 +295,11 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
         # Extract and flatten pull request data
         logger.info(f"Transforming PR #{pr.get('number')}")
 
-        matches = [m for m in BUG_RE.finditer(pr.get("title", "")) if int(m.group(1)) < 100000000]
+        matches = [
+            m
+            for m in BUG_RE.finditer(pr.get("title", ""))
+            if int(m.group(1)) < 100000000
+        ]
         bug_id = int(matches[0].group(1)) if matches else None
 
         transformed_pr = {
@@ -367,7 +383,7 @@ def load_data(
     Args:
         client: BigQuery client instance
         dataset_id: BigQuery dataset ID
-        transformed_data: List of transformed pull request dictionaries
+        transformed_data: Dictionary containing tables ('pull_requests', 'commits', 'reviewers', 'comments') mapped to lists of row dictionaries
     """
     logger = logging.getLogger(__name__)
 
@@ -475,12 +491,14 @@ def main() -> int:
         )
 
     total_processed = 0
+    chunk_count = 0
 
     for repo in github_repos:
         for chunk_count, chunk in enumerate(
             extract_pull_requests(
                 session, repo, chunk_size=100, github_api_url=github_api_url
-            ), start=1
+            ),
+            start=1,
         ):
             logger.info(f"Processing chunk {chunk_count} with {len(chunk)} PRs")
 
@@ -488,9 +506,7 @@ def main() -> int:
             transformed_data = transform_data(chunk, repo)
 
             # Load
-            load_data(
-                bigquery_client, bigquery_dataset, transformed_data
-            )
+            load_data(bigquery_client, bigquery_dataset, transformed_data)
 
             total_processed += len(chunk)
             logger.info(
@@ -498,8 +514,10 @@ def main() -> int:
             )
 
     logger.info(
-        f"GitHub ETL process completed successfully. Total PRs processed: {total_processed} in {chunk_count} chunks"
+        f"GitHub ETL process completed successfully. Total PRs processed: {total_processed}"
     )
+
+    return 0
 
 
 if __name__ == "__main__":
