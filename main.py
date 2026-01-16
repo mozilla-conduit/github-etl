@@ -12,7 +12,6 @@ import re
 import requests
 import sys
 import time
-from typing import List
 from datetime import datetime, timezone
 from typing import Iterator, Optional
 from urllib.parse import parse_qs, urlparse
@@ -38,7 +37,7 @@ def extract_pull_requests(
     repo: str,
     chunk_size: int = 100,
     github_api_url: Optional[str] = None,
-) -> Iterator[List[dict]]:
+) -> Iterator[list[dict]]:
     """
     Extract data from GitHub repositories in chunks.
 
@@ -79,7 +78,7 @@ def extract_pull_requests(
             # retry same URL/params after sleeping
             continue
         if resp.status_code != 200:
-            error_text = resp.text[:500] if resp.text else "No response text"
+            error_text = resp.text if resp.text else "No response text"
             raise SystemExit(f"GitHub API error {resp.status_code}: {error_text}")
 
         batch = resp.json()
@@ -115,20 +114,24 @@ def extract_pull_requests(
         parsed_url = urlparse(next_url)
         query_params = parse_qs(parsed_url.query)
         # Update only the page parameter, preserving other params
-        if "page" in query_params and query_params["page"]:
-            try:
-                page_num = int(query_params["page"][0])
-                if page_num > 0:
-                    params["page"] = page_num
-                else:
-                    logger.warning(f"Invalid page number {page_num} in next URL, stopping pagination")
-                    break
-            except (ValueError, IndexError) as e:
-                logger.warning(f"Invalid page parameter in next URL: {e}, stopping pagination")
-                break
-        else:
+        if "page" not in query_params or not query_params["page"]:
             # If no page parameter, this is unexpected - log and stop pagination
             logger.warning("No page parameter in next URL, stopping pagination")
+            break
+
+        try:
+            page_num = int(query_params["page"][0])
+            if page_num > 0:
+                params["page"] = page_num
+            else:
+                logger.warning(
+                    f"Invalid page number {page_num} in next URL, stopping pagination"
+                )
+                break
+        except (ValueError, IndexError) as e:
+            logger.warning(
+                f"Invalid page parameter in next URL: {e}, stopping pagination"
+            )
             break
 
     logger.info(f"Data extraction completed. Total PRs: {total}, Pages: {pages}")
@@ -139,7 +142,7 @@ def extract_commits(
     repo: str,
     pr_number: int,
     github_api_url: Optional[str] = None,
-) -> List[dict]:
+) -> list[dict]:
     """
     Extract commits for a specific pull request.
 
@@ -168,7 +171,7 @@ def extract_commits(
         sleep_for_rate_limit(resp)
         resp = session.get(commits_url)
     if resp.status_code != 200:
-        raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text[:500]}")
+        raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text}")
 
     commits = resp.json()
     logger.info(f"Extracted {len(commits)} commits for PR #{pr_number}")
@@ -180,7 +183,7 @@ def extract_reviewers(
     repo: str,
     pr_number: int,
     github_api_url: Optional[str] = None,
-) -> List[dict]:
+) -> list[dict]:
     """
     Extract reviewers for a specific pull request.
 
@@ -209,7 +212,7 @@ def extract_reviewers(
         sleep_for_rate_limit(resp)
         resp = session.get(reviewers_url)
     if resp.status_code != 200:
-        raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text[:500]}")
+        raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text}")
 
     reviewers = resp.json()
     logger.info(
@@ -223,7 +226,7 @@ def extract_comments(
     repo: str,
     pr_number: int,
     github_api_url: Optional[str] = None,
-) -> List[dict]:
+) -> list[dict]:
     """
     Extract comments for a specific pull request.
 
@@ -252,7 +255,7 @@ def extract_comments(
         sleep_for_rate_limit(resp)
         resp = session.get(comments_url)
     if resp.status_code != 200:
-        raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text[:500]}")
+        raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text}")
 
     comments = resp.json()
     logger.info(f"Extracted {len(comments)} comments for PR #{pr_number}")
@@ -271,7 +274,7 @@ def sleep_for_rate_limit(resp):
         time.sleep(sleep_time)
 
 
-def transform_data(raw_data: List[dict], repo: str) -> dict:
+def transform_data(raw_data: list[dict], repo: str) -> dict:
     """
     Transform GitHub pull request data into BigQuery-compatible format.
 
@@ -439,9 +442,8 @@ def main() -> int:
 
     github_token = os.environ.get("GITHUB_TOKEN")
     if not github_token:
-        print(
-            "Warning: No token provided. You will hit very low rate limits and private repos won't work.",
-            file=sys.stderr,
+        logger.warning(
+            "Warning: No token provided. You will hit very low rate limits and private repos won't work."
         )
 
     # Read BigQuery configuration
@@ -484,14 +486,15 @@ def main() -> int:
         bigquery_client = bigquery.Client(project=bigquery_project)
 
     # Read GitHub repository configuration
-    github_repos = os.getenv("GITHUB_REPOS").split(",")
-    if not github_repos:
+    github_repos = os.getenv("GITHUB_REPOS")
+    if github_repos:
+        github_repos = github_repos.split(",")
+    else:
         raise SystemExit(
             "Environment variable GITHUB_REPOS is required (format: 'owner/repo,owner/repo')"
         )
 
     total_processed = 0
-    chunk_count = 0
 
     for repo in github_repos:
         for chunk_count, chunk in enumerate(
