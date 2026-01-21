@@ -1,2 +1,8 @@
 # Essential dependencies for GitHub ETL
 requests>=2.25.0
+google-cloud-bigquery==3.25.0
+
+# Testing dependencies
+pytest>=7.0.0
+pytest-mock>=3.10.0
+pytest-cov>=4.0.0

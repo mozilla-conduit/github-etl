@@ -1,0 +1,86 @@
+projects:
+  - id: test
+    datasets:
+      - id: github_etl
+        tables:
+          - id: pull_requests
+            columns:
+              - name: pull_request_id
+                type: INTEGER
+              - name: current_status
+                type: STRING
+              - name: date_created
+                type: TIMESTAMP
+              - name: date_modified
+                type: TIMESTAMP
+              - name: target_repository
+                type: STRING
+              - name: bug_id
+                type: INTEGER
+              - name: date_landed
+                type: TIMESTAMP
+              - name: date_approved
+                type: TIMESTAMP
+              - name: labels
+                type: STRING
+                mode: REPEATED
+              - name: snapshot_date
+                type: DATE
+          - id: commits
+            columns:
+              - name: pull_request_id
+                type: INTEGER
+              - name: target_repository
+                type: STRING
+              - name: commit_sha
+                type: STRING
+              - name: date_created
+                type: TIMESTAMP
+              - name: author_username
+                type: STRING
+              - name: author_email
+                type: STRING
+              - name: filename
+                type: STRING
+              - name: lines_removed
+                type: INTEGER
+              - name: lines_added
+                type: INTEGER
+              - name: snapshot_date
+                type: DATE
+          - id: reviewers
+            columns:
+              - name: pull_request_id
+                type: INTEGER
+              - name: target_repository
+                type: STRING
+              - name: date_reviewed
+                type: TIMESTAMP
+              - name: reviewer_email
+                type: STRING
+              - name: reviewer_username
+                type: STRING
+              - name: status
+                type: STRING
+              - name: snapshot_date
+                type: DATE
+          - id: comments
+            columns:
+              - name: pull_request_id
+                type: INTEGER
+              - name: target_repository
+                type: STRING
+              - name: comment_id
+                type: INTEGER
+              - name: date_created
+                type: TIMESTAMP
+              - name: author_email
+                type: STRING
+              - name: author_username
+                type: STRING
+              - name: character_count
+                type: INTEGER
+              - name: status
+                type: STRING
+              - name: snapshot_date
+                type: DATE
