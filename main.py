@@ -9,15 +9,16 @@ and loads it into a BigQuery dataset using chunked processing.
 import logging
 import os
 import re
-import requests
 import sys
 import time
 from datetime import datetime, timezone
 from typing import Iterator, Optional
 from urllib.parse import parse_qs, urlparse
-from google.cloud import bigquery
+
+import requests
 from google.api_core.client_options import ClientOptions
 from google.auth.credentials import AnonymousCredentials
+from google.cloud import bigquery
 
 BUG_RE = re.compile(r"\b(?:bug|b=)\s*#?(\d+)\b", re.I)
 

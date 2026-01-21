@@ -10,7 +10,8 @@ import logging
 import os
 import time
 from datetime import datetime
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
+
 import pytest
 import requests
 from google.cloud import bigquery
