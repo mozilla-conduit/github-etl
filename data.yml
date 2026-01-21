@@ -54,7 +54,7 @@ projects:
                 type: INTEGER
               - name: target_repository
                 type: STRING
-              - name: date_review_requested
+              - name: date_reviewed
                 type: TIMESTAMP
               - name: reviewer_email
                 type: STRING

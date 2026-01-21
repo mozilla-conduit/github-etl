@@ -134,18 +134,98 @@ def generate_mock_comments(pr_number: int, count: int) -> list:
     return comments
 
 
-def generate_mock_reviewers (pr_number: int, count: int) -> dict:
+def generate_mock_reviewers(pr_number: int, count: int) -> list[dict]:
     """Generate a list of mock reviewers for a PR."""
     reviewers = []
+
+    # Define possible review states with weights for realistic distribution
+    # 50% approved, 30% changes requested, 15% comment, 5% dismissed
+    review_states = ["APPROVED"] * 50 + ["CHANGES_REQUESTED"] * 30 + ["COMMENTED"] * 15 + ["DISMISSED"] * 5
+
+    # Sample review body templates
+    review_bodies = [
+        "Looks good to me!",
+        "LGTM, great work!",
+        "Please address the following issues before merging.",
+        "I have some concerns about the implementation.",
+        "Nice improvements! Just a few minor suggestions.",
+        "This needs more work before it's ready.",
+        "Great job on this feature!",
+        "Consider refactoring this section for better performance.",
+    ]
+
+    # Author association options
+    author_associations = ["COLLABORATOR", "CONTRIBUTOR", "MEMBER", "OWNER"]
+
     for i in range(1, count + 1):
+        # Generate submitted_at timestamp (reviews submitted after PR creation, going backwards in time)
+        submitted_date = datetime.now(timezone.utc) - timedelta(hours=random.randint(1, 720))
+
+        # Select random review state
+        state = random.choice(review_states)
+
+        # Generate 40-character commit SHA
+        commit_sha = f"{pr_number:08d}{i:02d}" + "".join(random.choices("0123456789abcdef", k=30))
+
+        review_id = 3000000 + pr_number * 100 + i
+        reviewer_num = i % 5
+
         reviewers.append({
-            "id": 3000000 + pr_number * 100 + i,
-            "login": f"reviewer{i % 5}",
-            "html_url": f"",
-            "type": "User",
+            "id": review_id,
+            "node_id": f"PRR_{review_id}",
+            "user": {
+                "login": f"reviewer{reviewer_num}",
+                "id": 7000 + reviewer_num,
+                "type": "User",
+                "html_url": f"https://github.com/reviewer{reviewer_num}",
+            },
+            "body": random.choice(review_bodies),
+            "state": state,
+            "html_url": f"https://github.com/mozilla/firefox/pull/{pr_number}#pullrequestreview-{review_id}",
+            "pull_request_url": f"https://api.github.com/repos/mozilla/firefox/pulls/{pr_number}",
+            "_links": {
+                "html": {
+                    "href": f"https://github.com/mozilla/firefox/pull/{pr_number}#pullrequestreview-{review_id}"
+                },
+                "pull_request": {
+                    "href": f"https://api.github.com/repos/mozilla/firefox/pulls/{pr_number}"
+                }
+            },
+            "submitted_at": submitted_date.isoformat(),
+            "commit_id": commit_sha,
+            "author_association": random.choice(author_associations),
         })
 
-    return {"users": reviewers, "teams": []}
+    return reviewers
+
+
+def generate_mock_commit_files(commit_sha: str, count: int) -> list:
+    """Generate a list of mock files for a commit."""
+    file_extensions = [".py", ".js", ".ts", ".cpp", ".h", ".json", ".md", ".yml"]
+    file_statuses = ["modified", "added", "removed", "renamed"]
+
+    files = []
+    for i in range(1, count + 1):
+        ext = random.choice(file_extensions)
+        status = random.choice(file_statuses)
+        filename = f"src/components/module{i % 10}/file{i}{ext}"
+        additions = random.randint(1, 100) if status != "removed" else 0
+        deletions = random.randint(1, 50) if status != "added" else 0
+
+        files.append({
+            "filename": filename,
+            "status": status,
+            "additions": additions,
+            "deletions": deletions,
+            "changes": additions + deletions,
+            "blob_url": f"https://github.com/mozilla/firefox/blob/{commit_sha}/{filename}",
+            "raw_url": f"https://github.com/mozilla/firefox/raw/{commit_sha}/{filename}",
+            "contents_url": f"https://api.github.com/repos/mozilla/firefox/contents/{filename}?ref={commit_sha}",
+            "sha": f"file{i:04d}{commit_sha[:8]}",
+            "patch": f"@@ -1,{deletions} +1,{additions} @@\n-old line\n+new line" if status != "added" else None,
+        })
+
+    return files
 
 
 @app.route("/repos/<owner>/<repo>/pulls", methods=["GET"])
@@ -214,14 +294,65 @@ def get_pr_comments(owner: str, repo: str, pr_number: int):
     return response
 
 
-@app.route("/repos/<owner>/<repo>/pulls/<int:pr_number>/requested_reviewers", methods=["GET"])
-def get_pr_reviews(owner: str, repo: str, pr_number: int):
+@app.route("/repos/<owner>/<repo>/pulls/<int:pr_number>/reviews", methods=["GET"])
+def get_pr_reviewers(owner: str, repo: str, pr_number: int):
     """Mock endpoint for listing pull request reviews."""
     # For testing, generate a random number of reviewers between 0 and 5
     reviewer_count = random.randint(0, 5)
-    reviews = generate_mock_reviewers(pr_number, reviewer_count)
+    reviewers = generate_mock_reviewers(pr_number, reviewer_count)
 
-    response = jsonify(reviews)
+    response = jsonify(reviewers)
+
+    # Add mock rate limit headers
+    response.headers["X-RateLimit-Limit"] = "5000"
+    response.headers["X-RateLimit-Remaining"] = "4999"
+    response.headers["X-RateLimit-Reset"] = str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+
+    return response
+
+
+@app.route("/repos/<owner>/<repo>/commits/<ref>", methods=["GET"])
+def get_commit(owner: str, repo: str, ref: str):
+    """Mock endpoint for getting a single commit with file information."""
+    # Generate a random number of files between 1 and 15
+    file_count = random.randint(1, 15)
+    files = generate_mock_commit_files(ref, file_count)
+
+    # Create commit data matching GitHub API response structure
+    created_date = datetime.now(timezone.utc) - timedelta(days=random.randint(1, 365))
+    commit_data = {
+        "sha": ref,
+        "commit": {
+            "message": f"Mock commit message for {ref}",
+            "author": {
+                "name": f"Author{random.randint(0, 4)}",
+                "email": f"author{random.randint(0, 4)}@example.com",
+                "date": created_date.strftime(DATE_FORMAT),
+            },
+            "committer": {
+                "name": f"Committer{random.randint(0, 4)}",
+                "email": f"committer{random.randint(0, 4)}@example.com",
+                "date": created_date.strftime(DATE_FORMAT),
+            },
+        },
+        "author": {
+            "login": f"author{random.randint(0, 4)}",
+            "id": 4000 + random.randint(0, 4),
+        },
+        "committer": {
+            "login": f"committer{random.randint(0, 4)}",
+            "id": 4000 + random.randint(0, 4),
+        },
+        "html_url": f"https://github.com/{owner}/{repo}/commit/{ref}",
+        "files": files,
+        "stats": {
+            "additions": sum(f["additions"] for f in files),
+            "deletions": sum(f["deletions"] for f in files),
+            "total": sum(f["changes"] for f in files),
+        },
+    }
+
+    response = jsonify(commit_data)
 
     # Add mock rate limit headers
     response.headers["X-RateLimit-Limit"] = "5000"

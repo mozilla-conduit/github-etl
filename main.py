@@ -144,7 +144,7 @@ def extract_commits(
     github_api_url: Optional[str] = None,
 ) -> list[dict]:
     """
-    Extract commits for a specific pull request.
+    Extract commits and files for a specific pull request.
 
     Args:
         session: Authenticated requests session
@@ -174,6 +174,17 @@ def extract_commits(
         raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text}")
 
     commits = resp.json()
+    for commit in commits:
+        commit_sha = commit.get("sha")
+        commit_url = f"{api_base}/repos/{repo}/commits/{commit_sha}"
+        commit_resp = session.get(commit_url)
+        if commit_resp.status_code != 200:
+            raise SystemExit(
+                f"GitHub API error {commit_resp.status_code}: {commit_resp.text}"
+            )
+        commit_data = commit_resp.json()
+        commit["files"] = commit_data.get("files", [])
+
     logger.info(f"Extracted {len(commits)} commits for PR #{pr_number}")
     return commits
 
@@ -196,11 +207,11 @@ def extract_reviewers(
         List of reviewer dictionaries for the pull request
     """
     logger = logging.getLogger(__name__)
-    logger.info(f"Extracting reviews for PR #{pr_number}")
+    logger.info(f"Extracting reviewers for PR #{pr_number}")
 
     # Support custom API URL for mocking/testing
     api_base = github_api_url or "https://api.github.com"
-    reviewers_url = f"{api_base}/repos/{repo}/pulls/{pr_number}/requested_reviewers"
+    reviewers_url = f"{api_base}/repos/{repo}/pulls/{pr_number}/reviews"
 
     logger.info(f"Reviewers URL: {reviewers_url}")
 
@@ -215,9 +226,16 @@ def extract_reviewers(
         raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text}")
 
     reviewers = resp.json()
-    logger.info(
-        f"Extracted {len(reviewers.get('users', []))} reviews for PR #{pr_number}"
-    )
+
+    # Remove any reviews that are just comments (i.e., state is 'COMMENTED')
+    # We only want reviews that have an approval or request changes
+    reviewers = [r for r in reviewers if r.get("state") != "COMMENTED"]
+
+    # Add the pull request id to each review for easier reference later
+    for reviewer in reviewers:
+        reviewer["pull_request_id"] = pr_number
+
+    logger.info(f"Extracted {len(reviewers)} reviewers for PR #{pr_number}")
     return reviewers
 
 
@@ -313,43 +331,58 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
             "target_repository": repo,
             "bug_id": bug_id,
             "date_landed": pr.get("merged_at"),
-            "date_approved": None,  # TODO Placeholder for approval date extraction logic
+            "date_approved": None,  # This will be filled later
             "labels": [label.get("name") for label in pr.get("labels", [])]
             if pr.get("labels")
             else [],
         }
-        transformed_data["pull_requests"].append(transformed_pr)
 
         # Extract and flatten commit data
         logger.info("Transforming commits for PR #{}".format(pr.get("number")))
         for commit in pr["commit_data"]:
-            transformed_commit = {
-                "pull_request_id": pr.get("number"),
-                "target_repository": repo,
-                "commit_sha": commit.get("sha"),
-                "date_created": commit.get("commit", {}).get("author", {}).get("date"),
-                "author_username": commit.get("commit", {})
-                .get("author", {})
-                .get("name"),
-                "author_email": commit.get("commit", {}).get("author", {}).get("email"),
-                "filename": None,  # TODO Placeholder for filename extraction logic
-                "lines_removed": None,  # TODO Placeholder for lines removed extraction logic
-                "lines_added": None,  # TODO Placeholder for lines added extraction logic
-            }
-            transformed_data["commits"].append(transformed_commit)
+            for file in commit["files"]:
+                transformed_commit = {
+                    "pull_request_id": pr.get("number"),
+                    "target_repository": repo,
+                    "commit_sha": commit.get("sha"),
+                    "date_created": commit.get("commit", {})
+                    .get("author", {})
+                    .get("date"),
+                    "author_username": commit.get("commit", {})
+                    .get("author", {})
+                    .get("name"),
+                    "author_email": None,  # TODO Placeholder for author email extraction logic
+                    "filename": file.get("filename"),
+                    "lines_removed": file.get("deletions"),
+                    "lines_added": file.get("additions"),
+                }
+                transformed_data["commits"].append(transformed_commit)
 
         # Extract and flatten reviewer data
+        review_id_statuses = {}
         logger.info("Transforming reviewers for PR #{}".format(pr.get("number")))
-        for review in pr["reviewer_data"]["users"]:
+        for review in pr["reviewer_data"]:
+            # Store the review state for adding to the comments table later
+            review_id = review.get("id")
+            review_id_statuses[review_id] = review.get("state")
+
             transformed_reviewer = {
-                "pull_request_id": pr.get("number"),
+                "pull_request_id": pr.get("pull_request_id"),
                 "target_repository": repo,
-                "date_review_requested": None,  # TODO Placeholder for actual request date
+                "date_reviewed": review.get("submitted_at"),
                 "reviewer_email": None,  # TODO Placeholder for reviewer email extraction logic
-                "reviewer_username": review.get("user", {}),
-                "status": None,  # TODO Placeholder for review status extraction logic
+                "reviewer_username": review.get("user", {}).get("login", "None"),
+                "status": review.get("state"),
             }
             transformed_data["reviewers"].append(transformed_reviewer)
+
+            # If the request is approved then store the date in the date_approved for the pull request
+            if review.get("state") == "APPROVED":
+                approved_date = review.get("submitted_at")
+                if transformed_pr.get(
+                    "date_approved"
+                ) is None or approved_date < transformed_pr.get("date_approved"):
+                    transformed_pr["date_approved"] = approved_date
 
         # Extract and flatten comment data
         logger.info("Transforming comments for PR #{}".format(pr.get("number")))
@@ -359,14 +392,22 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
                 "target_repository": repo,
                 "comment_id": comment.get("id"),
                 "date_created": comment.get("created_at"),
-                "author_email": None,  # TODO
+                "author_email": None,  # TODO Placeholder for reviewer email extraction logic
                 "author_username": comment.get("user", {}).get("login"),
                 "character_count": len(comment.get("body", ""))
                 if comment.get("body")
                 else 0,
                 "status": None,  # TODO
             }
+
+            # If we stored a review state for this comment earlier we can add it now
+            pr_review_id = comment.get("pull_request_review_id")
+            if pr_review_id in review_id_statuses:
+                transformed_comment["status"] = review_id_statuses[pr_review_id]
+
             transformed_data["comments"].append(transformed_comment)
+
+        transformed_data["pull_requests"].append(transformed_pr)
 
     logger.info(
         f"Data transformation completed for {len(transformed_data['pull_requests'])} PRs"
