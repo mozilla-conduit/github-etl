@@ -19,7 +19,6 @@ from google.cloud import bigquery
 from google.api_core.client_options import ClientOptions
 from google.auth.credentials import AnonymousCredentials
 
-
 BUG_RE = re.compile(r"\b(?:bug|b=)\s*#?(\d+)\b", re.I)
 
 
@@ -325,9 +324,11 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
             "bug_id": bug_id,
             "date_landed": pr.get("merged_at"),
             "date_approved": None,  # This will be filled later
-            "labels": [label.get("name") for label in pr.get("labels", [])]
-            if pr.get("labels")
-            else [],
+            "labels": (
+                [label.get("name") for label in pr.get("labels", [])]
+                if pr.get("labels")
+                else []
+            ),
         }
 
         # Extract and flatten commit data
@@ -387,9 +388,9 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
                 "date_created": comment.get("created_at"),
                 "author_email": None,  # TODO Placeholder for reviewer email extraction logic
                 "author_username": comment.get("user", {}).get("login"),
-                "character_count": len(comment.get("body", ""))
-                if comment.get("body")
-                else 0,
+                "character_count": (
+                    len(comment.get("body", "")) if comment.get("body") else 0
+                ),
                 "status": None,  # TODO
             }
 
