@@ -228,7 +228,7 @@ mypy main.py --no-strict-optional --ignore-missing-imports
 
 ### GitHub Actions Workflow
 
-The `.github/workflows/tests.yml` workflow runs on every push and pull request:
+The `.github/workflows/tests.yml` workflow runs on every pull request:
 
 **Lint Job:**
 1. Runs black (format check)
@@ -243,7 +243,6 @@ The `.github/workflows/tests.yml` workflow runs on every push and pull request:
 
 ### Workflow Triggers
 
-- Push to `main` or `unit-tests` branch
 - Pull requests to `main` branch
 
 ### Viewing Results

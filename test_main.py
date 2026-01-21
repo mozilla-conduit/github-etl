@@ -8,10 +8,9 @@ including extraction, transformation, loading, and orchestration logic.
 
 import logging
 import os
-import sys
 import time
-from datetime import datetime, timezone
-from unittest.mock import Mock, MagicMock, patch, call
+from datetime import datetime
+from unittest.mock import Mock, MagicMock, patch
 import pytest
 import requests
 from google.cloud import bigquery
@@ -143,9 +142,7 @@ class TestSleepForRateLimit:
 
     @patch("time.time")
     @patch("time.sleep")
-    def test_sleep_for_rate_limit_when_remaining_is_zero(
-        self, mock_sleep, mock_time
-    ):
+    def test_sleep_for_rate_limit_when_remaining_is_zero(self, mock_sleep, mock_time):
         """Test that sleep_for_rate_limit sleeps until reset time."""
         mock_time.return_value = 1000
 
@@ -220,12 +217,12 @@ class TestExtractPullRequests:
         mock_session.get.return_value = mock_response
 
         # Mock the extract functions
-        with patch("main.extract_commits", return_value=[]), patch(
-            "main.extract_reviewers", return_value=[]
-        ), patch("main.extract_comments", return_value=[]):
-            result = list(
-                main.extract_pull_requests(mock_session, "mozilla/firefox")
-            )
+        with (
+            patch("main.extract_commits", return_value=[]),
+            patch("main.extract_reviewers", return_value=[]),
+            patch("main.extract_comments", return_value=[]),
+        ):
+            result = list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
         assert len(result) == 1
         assert len(result[0]) == 2
@@ -242,9 +239,7 @@ class TestExtractPullRequests:
             {"number": 2, "title": "PR 2"},
         ]
         mock_response_1.links = {
-            "next": {
-                "url": "https://api.github.com/repos/mozilla/firefox/pulls?page=2"
-            }
+            "next": {"url": "https://api.github.com/repos/mozilla/firefox/pulls?page=2"}
         }
 
         # Second page response
@@ -255,12 +250,12 @@ class TestExtractPullRequests:
 
         mock_session.get.side_effect = [mock_response_1, mock_response_2]
 
-        with patch("main.extract_commits", return_value=[]), patch(
-            "main.extract_reviewers", return_value=[]
-        ), patch("main.extract_comments", return_value=[]):
-            result = list(
-                main.extract_pull_requests(mock_session, "mozilla/firefox")
-            )
+        with (
+            patch("main.extract_commits", return_value=[]),
+            patch("main.extract_reviewers", return_value=[]),
+            patch("main.extract_comments", return_value=[]),
+        ):
+            result = list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
         assert len(result) == 2
         assert len(result[0]) == 2
@@ -279,16 +274,14 @@ class TestExtractPullRequests:
 
         mock_commits = [{"sha": "abc123"}]
 
-        with patch(
-            "main.extract_commits", return_value=mock_commits
-        ) as mock_extract_commits, patch(
-            "main.extract_reviewers", return_value=[]
-        ), patch(
-            "main.extract_comments", return_value=[]
+        with (
+            patch(
+                "main.extract_commits", return_value=mock_commits
+            ) as mock_extract_commits,
+            patch("main.extract_reviewers", return_value=[]),
+            patch("main.extract_comments", return_value=[]),
         ):
-            result = list(
-                main.extract_pull_requests(mock_session, "mozilla/firefox")
-            )
+            result = list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
         assert result[0][0]["commit_data"] == mock_commits
         mock_extract_commits.assert_called_once()
@@ -304,14 +297,14 @@ class TestExtractPullRequests:
 
         mock_reviewers = [{"id": 789, "state": "APPROVED"}]
 
-        with patch("main.extract_commits", return_value=[]), patch(
-            "main.extract_reviewers", return_value=mock_reviewers
-        ) as mock_extract_reviewers, patch(
-            "main.extract_comments", return_value=[]
+        with (
+            patch("main.extract_commits", return_value=[]),
+            patch(
+                "main.extract_reviewers", return_value=mock_reviewers
+            ) as mock_extract_reviewers,
+            patch("main.extract_comments", return_value=[]),
         ):
-            result = list(
-                main.extract_pull_requests(mock_session, "mozilla/firefox")
-            )
+            result = list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
         assert result[0][0]["reviewer_data"] == mock_reviewers
         mock_extract_reviewers.assert_called_once()
@@ -327,14 +320,14 @@ class TestExtractPullRequests:
 
         mock_comments = [{"id": 456, "body": "Great work!"}]
 
-        with patch("main.extract_commits", return_value=[]), patch(
-            "main.extract_reviewers", return_value=[]
-        ), patch(
-            "main.extract_comments", return_value=mock_comments
-        ) as mock_extract_comments:
-            result = list(
-                main.extract_pull_requests(mock_session, "mozilla/firefox")
-            )
+        with (
+            patch("main.extract_commits", return_value=[]),
+            patch("main.extract_reviewers", return_value=[]),
+            patch(
+                "main.extract_comments", return_value=mock_comments
+            ) as mock_extract_comments,
+        ):
+            result = list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
         assert result[0][0]["comment_data"] == mock_comments
         mock_extract_comments.assert_called_once()
@@ -350,9 +343,7 @@ class TestExtractPullRequests:
         # Successful response after rate limit
         mock_response_success = Mock()
         mock_response_success.status_code = 200
-        mock_response_success.json.return_value = [
-            {"number": 1, "title": "PR 1"}
-        ]
+        mock_response_success.json.return_value = [{"number": 1, "title": "PR 1"}]
         mock_response_success.links = {}
 
         mock_session.get.side_effect = [
@@ -360,12 +351,12 @@ class TestExtractPullRequests:
             mock_response_success,
         ]
 
-        with patch("main.extract_commits", return_value=[]), patch(
-            "main.extract_reviewers", return_value=[]
-        ), patch("main.extract_comments", return_value=[]):
-            result = list(
-                main.extract_pull_requests(mock_session, "mozilla/firefox")
-            )
+        with (
+            patch("main.extract_commits", return_value=[]),
+            patch("main.extract_reviewers", return_value=[]),
+            patch("main.extract_comments", return_value=[]),
+        ):
+            result = list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
         mock_sleep.assert_called_once_with(mock_response_rate_limit)
         assert len(result) == 1
@@ -403,9 +394,7 @@ class TestExtractPullRequests:
         mock_response_1.status_code = 200
         mock_response_1.json.return_value = [{"number": 1}]
         mock_response_1.links = {
-            "next": {
-                "url": "https://api.github.com/repos/mozilla/firefox/pulls?page=2"
-            }
+            "next": {"url": "https://api.github.com/repos/mozilla/firefox/pulls?page=2"}
         }
 
         # Second page empty
@@ -416,12 +405,12 @@ class TestExtractPullRequests:
 
         mock_session.get.side_effect = [mock_response_1, mock_response_2]
 
-        with patch("main.extract_commits", return_value=[]), patch(
-            "main.extract_reviewers", return_value=[]
-        ), patch("main.extract_comments", return_value=[]):
-            result = list(
-                main.extract_pull_requests(mock_session, "mozilla/firefox")
-            )
+        with (
+            patch("main.extract_commits", return_value=[]),
+            patch("main.extract_reviewers", return_value=[]),
+            patch("main.extract_comments", return_value=[]),
+        ):
+            result = list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
         # Should only have 1 chunk from first page
         assert len(result) == 1
@@ -440,12 +429,12 @@ class TestExtractPullRequests:
 
         mock_session.get.return_value = mock_response_1
 
-        with patch("main.extract_commits", return_value=[]), patch(
-            "main.extract_reviewers", return_value=[]
-        ), patch("main.extract_comments", return_value=[]):
-            result = list(
-                main.extract_pull_requests(mock_session, "mozilla/firefox")
-            )
+        with (
+            patch("main.extract_commits", return_value=[]),
+            patch("main.extract_reviewers", return_value=[]),
+            patch("main.extract_comments", return_value=[]),
+        ):
+            result = list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
         # Should stop pagination on invalid page number
         assert len(result) == 1
@@ -461,9 +450,11 @@ class TestExtractPullRequests:
 
         mock_session.get.return_value = mock_response
 
-        with patch("main.extract_commits", return_value=[]), patch(
-            "main.extract_reviewers", return_value=[]
-        ), patch("main.extract_comments", return_value=[]):
+        with (
+            patch("main.extract_commits", return_value=[]),
+            patch("main.extract_reviewers", return_value=[]),
+            patch("main.extract_comments", return_value=[]),
+        ):
             list(
                 main.extract_pull_requests(
                     mock_session, "mozilla/firefox", github_api_url=custom_url
@@ -487,12 +478,12 @@ class TestExtractPullRequests:
 
         mock_session.get.return_value = mock_response
 
-        with patch("main.extract_commits", return_value=[]) as mock_commits, patch(
-            "main.extract_reviewers", return_value=[]
-        ), patch("main.extract_comments", return_value=[]):
-            result = list(
-                main.extract_pull_requests(mock_session, "mozilla/firefox")
-            )
+        with (
+            patch("main.extract_commits", return_value=[]) as mock_commits,
+            patch("main.extract_reviewers", return_value=[]),
+            patch("main.extract_comments", return_value=[]),
+        ):
+            list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
         # extract_commits should only be called for PRs with number field
         assert mock_commits.call_count == 2
@@ -631,7 +622,11 @@ class TestExtractCommits:
         commit_detail_2.status_code = 200
         commit_detail_2.json.return_value = {"files": []}
 
-        mock_session.get.side_effect = [commits_response, commit_detail_1, commit_detail_2]
+        mock_session.get.side_effect = [
+            commits_response,
+            commit_detail_1,
+            commit_detail_2,
+        ]
 
         result = main.extract_commits(mock_session, "mozilla/firefox", 123)
 
@@ -1470,7 +1465,9 @@ class TestTransformData:
                     {
                         "sha": "abc",
                         "commit": {"author": {"name": "Author", "date": "2024-01-01"}},
-                        "files": [{"filename": "test.py", "additions": 1, "deletions": 0}],
+                        "files": [
+                            {"filename": "test.py", "additions": 1, "deletions": 0}
+                        ],
                     }
                 ],
                 "reviewer_data": [
@@ -1594,7 +1591,12 @@ class TestLoadData:
             {"index": 0, "errors": ["Insert failed"]}
         ]
 
-        transformed_data = {"pull_requests": [{"pull_request_id": 1}], "commits": [], "reviewers": [], "comments": []}
+        transformed_data = {
+            "pull_requests": [{"pull_request_id": 1}],
+            "commits": [],
+            "reviewers": [],
+            "comments": [],
+        }
 
         with pytest.raises(Exception) as exc_info:
             main.load_data(mock_bigquery_client, "test_dataset", transformed_data)
@@ -1647,7 +1649,9 @@ class TestMain:
     ):
         """Test that BIGQUERY_PROJECT is required."""
         with patch.dict(
-            os.environ, {"GITHUB_REPOS": "mozilla/firefox", "BIGQUERY_DATASET": "test"}, clear=True
+            os.environ,
+            {"GITHUB_REPOS": "mozilla/firefox", "BIGQUERY_DATASET": "test"},
+            clear=True,
         ):
             with pytest.raises(SystemExit) as exc_info:
                 main.main()
@@ -1662,7 +1666,9 @@ class TestMain:
     ):
         """Test that BIGQUERY_DATASET is required."""
         with patch.dict(
-            os.environ, {"GITHUB_REPOS": "mozilla/firefox", "BIGQUERY_PROJECT": "test"}, clear=True
+            os.environ,
+            {"GITHUB_REPOS": "mozilla/firefox", "BIGQUERY_PROJECT": "test"},
+            clear=True,
         ):
             with pytest.raises(SystemExit) as exc_info:
                 main.main()
@@ -1676,15 +1682,18 @@ class TestMain:
         self, mock_session_class, mock_bq_client, mock_setup_logging
     ):
         """Test that GITHUB_TOKEN is optional but warns if missing."""
-        with patch.dict(
-            os.environ,
-            {
-                "GITHUB_REPOS": "mozilla/firefox",
-                "BIGQUERY_PROJECT": "test",
-                "BIGQUERY_DATASET": "test",
-            },
-            clear=True,
-        ), patch("main.extract_pull_requests", return_value=iter([])):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GITHUB_REPOS": "mozilla/firefox",
+                    "BIGQUERY_PROJECT": "test",
+                    "BIGQUERY_DATASET": "test",
+                },
+                clear=True,
+            ),
+            patch("main.extract_pull_requests", return_value=iter([])),
+        ):
             # Should not raise, but should log warning
             result = main.main()
             assert result == 0
@@ -1696,16 +1705,19 @@ class TestMain:
         self, mock_session_class, mock_bq_client, mock_setup_logging
     ):
         """Test that GITHUB_REPOS is split by comma."""
-        with patch.dict(
-            os.environ,
-            {
-                "GITHUB_REPOS": "mozilla/firefox,mozilla/gecko-dev",
-                "BIGQUERY_PROJECT": "test",
-                "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "token",
-            },
-            clear=True,
-        ), patch("main.extract_pull_requests", return_value=iter([])) as mock_extract:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GITHUB_REPOS": "mozilla/firefox,mozilla/gecko-dev",
+                    "BIGQUERY_PROJECT": "test",
+                    "BIGQUERY_DATASET": "test",
+                    "GITHUB_TOKEN": "token",
+                },
+                clear=True,
+            ),
+            patch("main.extract_pull_requests", return_value=iter([])) as mock_extract,
+        ):
             main.main()
 
             # Should be called twice (once per repo)
@@ -1718,17 +1730,20 @@ class TestMain:
         self, mock_session_class, mock_bq_client, mock_setup_logging
     ):
         """Test that GITHUB_API_URL is honored."""
-        with patch.dict(
-            os.environ,
-            {
-                "GITHUB_REPOS": "mozilla/firefox",
-                "BIGQUERY_PROJECT": "test",
-                "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "token",
-                "GITHUB_API_URL": "https://custom-api.example.com",
-            },
-            clear=True,
-        ), patch("main.extract_pull_requests", return_value=iter([])) as mock_extract:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GITHUB_REPOS": "mozilla/firefox",
+                    "BIGQUERY_PROJECT": "test",
+                    "BIGQUERY_DATASET": "test",
+                    "GITHUB_TOKEN": "token",
+                    "GITHUB_API_URL": "https://custom-api.example.com",
+                },
+                clear=True,
+            ),
+            patch("main.extract_pull_requests", return_value=iter([])) as mock_extract,
+        ):
             main.main()
 
             call_kwargs = mock_extract.call_args[1]
@@ -1741,17 +1756,20 @@ class TestMain:
         self, mock_session_class, mock_bq_client_class, mock_setup_logging
     ):
         """Test that BIGQUERY_EMULATOR_HOST is honored."""
-        with patch.dict(
-            os.environ,
-            {
-                "GITHUB_REPOS": "mozilla/firefox",
-                "BIGQUERY_PROJECT": "test",
-                "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "token",
-                "BIGQUERY_EMULATOR_HOST": "http://localhost:9050",
-            },
-            clear=True,
-        ), patch("main.extract_pull_requests", return_value=iter([])):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GITHUB_REPOS": "mozilla/firefox",
+                    "BIGQUERY_PROJECT": "test",
+                    "BIGQUERY_DATASET": "test",
+                    "GITHUB_TOKEN": "token",
+                    "BIGQUERY_EMULATOR_HOST": "http://localhost:9050",
+                },
+                clear=True,
+            ),
+            patch("main.extract_pull_requests", return_value=iter([])),
+        ):
             main.main()
 
             # Verify BigQuery client was created with emulator settings
@@ -1767,16 +1785,19 @@ class TestMain:
         mock_session = MagicMock()
         mock_session_class.return_value = mock_session
 
-        with patch.dict(
-            os.environ,
-            {
-                "GITHUB_REPOS": "mozilla/firefox",
-                "BIGQUERY_PROJECT": "test",
-                "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "token",
-            },
-            clear=True,
-        ), patch("main.extract_pull_requests", return_value=iter([])):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GITHUB_REPOS": "mozilla/firefox",
+                    "BIGQUERY_PROJECT": "test",
+                    "BIGQUERY_DATASET": "test",
+                    "GITHUB_TOKEN": "token",
+                },
+                clear=True,
+            ),
+            patch("main.extract_pull_requests", return_value=iter([])),
+        ):
             main.main()
 
             # Verify session headers were set
@@ -1795,16 +1816,19 @@ class TestMain:
         mock_session = MagicMock()
         mock_session_class.return_value = mock_session
 
-        with patch.dict(
-            os.environ,
-            {
-                "GITHUB_REPOS": "mozilla/firefox",
-                "BIGQUERY_PROJECT": "test",
-                "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "test-token-123",
-            },
-            clear=True,
-        ), patch("main.extract_pull_requests", return_value=iter([])):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GITHUB_REPOS": "mozilla/firefox",
+                    "BIGQUERY_PROJECT": "test",
+                    "BIGQUERY_DATASET": "test",
+                    "GITHUB_TOKEN": "test-token-123",
+                },
+                clear=True,
+            ),
+            patch("main.extract_pull_requests", return_value=iter([])),
+        ):
             main.main()
 
             # Verify Authorization header was set
@@ -1827,7 +1851,12 @@ class TestMain:
     ):
         """Test successful ETL for single repository."""
         mock_extract.return_value = iter([[{"number": 1}]])
-        mock_transform.return_value = {"pull_requests": [{"pull_request_id": 1}], "commits": [], "reviewers": [], "comments": []}
+        mock_transform.return_value = {
+            "pull_requests": [{"pull_request_id": 1}],
+            "commits": [],
+            "reviewers": [],
+            "comments": [],
+        }
 
         with patch.dict(
             os.environ,
@@ -1863,7 +1892,12 @@ class TestMain:
     ):
         """Test processing multiple repositories."""
         mock_extract.return_value = iter([[{"number": 1}]])
-        mock_transform.return_value = {"pull_requests": [{"pull_request_id": 1}], "commits": [], "reviewers": [], "comments": []}
+        mock_transform.return_value = {
+            "pull_requests": [{"pull_request_id": 1}],
+            "commits": [],
+            "reviewers": [],
+            "comments": [],
+        }
 
         with patch.dict(
             os.environ,
@@ -1898,12 +1932,19 @@ class TestMain:
     ):
         """Test that chunks are processed iteratively from generator."""
         # Return 3 chunks
-        mock_extract.return_value = iter([
-            [{"number": 1}],
-            [{"number": 2}],
-            [{"number": 3}],
-        ])
-        mock_transform.return_value = {"pull_requests": [{"pull_request_id": 1}], "commits": [], "reviewers": [], "comments": []}
+        mock_extract.return_value = iter(
+            [
+                [{"number": 1}],
+                [{"number": 2}],
+                [{"number": 3}],
+            ]
+        )
+        mock_transform.return_value = {
+            "pull_requests": [{"pull_request_id": 1}],
+            "commits": [],
+            "reviewers": [],
+            "comments": [],
+        }
 
         with patch.dict(
             os.environ,
@@ -1929,16 +1970,19 @@ class TestMain:
         self, mock_session_class, mock_bq_client, mock_setup_logging
     ):
         """Test that main returns 0 on success."""
-        with patch.dict(
-            os.environ,
-            {
-                "GITHUB_REPOS": "mozilla/firefox",
-                "BIGQUERY_PROJECT": "test",
-                "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "token",
-            },
-            clear=True,
-        ), patch("main.extract_pull_requests", return_value=iter([])):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GITHUB_REPOS": "mozilla/firefox",
+                    "BIGQUERY_PROJECT": "test",
+                    "BIGQUERY_DATASET": "test",
+                    "GITHUB_TOKEN": "token",
+                },
+                clear=True,
+            ),
+            patch("main.extract_pull_requests", return_value=iter([])),
+        ):
             result = main.main()
 
         assert result == 0
@@ -2014,7 +2058,11 @@ class TestIntegration:
         pr_response = Mock()
         pr_response.status_code = 200
         pr_response.json.return_value = [
-            {"number": 1, "title": "Bug 9876543 - Fix critical issue", "state": "closed"}
+            {
+                "number": 1,
+                "title": "Bug 9876543 - Fix critical issue",
+                "state": "closed",
+            }
         ]
         pr_response.links = {}
 
