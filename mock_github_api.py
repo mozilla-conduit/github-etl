@@ -261,7 +261,7 @@ def get_pulls(owner: str, repo: str):
 
 
 @app.route("/repos/<owner>/<repo>/pulls/<int:pr_number>/commits", methods=["GET"])
-def get_pr_commits  (owner: str, repo: str, pr_number: int):
+def get_pr_commits(owner: str, repo: str, pr_number: int):
     """Mock endpoint for listing pull request commits."""
     # For testing, generate a random number of commits between 1 and 20
     commit_count = random.randint(1, 20)

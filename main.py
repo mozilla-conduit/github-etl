@@ -72,7 +72,7 @@ def extract_pull_requests(
         resp = session.get(base_url, params=params)
         if (
             resp.status_code == 403
-            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == "0"
+            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
         ):
             sleep_for_rate_limit(resp)
             # retry same URL/params after sleeping
@@ -166,7 +166,7 @@ def extract_commits(
     resp = session.get(commits_url)
     if (
         resp.status_code == 403
-        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == "0"
+        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
     ):
         sleep_for_rate_limit(resp)
         resp = session.get(commits_url)
@@ -218,7 +218,7 @@ def extract_reviewers(
     resp = session.get(reviewers_url)
     if (
         resp.status_code == 403
-        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == "0"
+        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
     ):
         sleep_for_rate_limit(resp)
         resp = session.get(reviewers_url)
@@ -226,14 +226,6 @@ def extract_reviewers(
         raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text}")
 
     reviewers = resp.json()
-
-    # Remove any reviews that are just comments (i.e., state is 'COMMENTED')
-    # We only want reviews that have an approval or request changes
-    reviewers = [r for r in reviewers if r.get("state") != "COMMENTED"]
-
-    # Add the pull request id to each review for easier reference later
-    for reviewer in reviewers:
-        reviewer["pull_request_id"] = pr_number
 
     logger.info(f"Extracted {len(reviewers)} reviewers for PR #{pr_number}")
     return reviewers
@@ -268,7 +260,7 @@ def extract_comments(
     resp = session.get(comments_url)
     if (
         resp.status_code == 403
-        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == "0"
+        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
     ):
         sleep_for_rate_limit(resp)
         resp = session.get(comments_url)
@@ -338,7 +330,7 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
         }
 
         # Extract and flatten commit data
-        logger.info("Transforming commits for PR #{}".format(pr.get("number")))
+        logger.info(f"Transforming commits for PR #{pr.get('number')}")
         for commit in pr["commit_data"]:
             for file in commit["files"]:
                 transformed_commit = {
@@ -360,14 +352,14 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
 
         # Extract and flatten reviewer data
         review_id_statuses = {}
-        logger.info("Transforming reviewers for PR #{}".format(pr.get("number")))
+        logger.info(f"Transforming reviewers for PR #{pr.get('number')}")
         for review in pr["reviewer_data"]:
             # Store the review state for adding to the comments table later
             review_id = review.get("id")
             review_id_statuses[review_id] = review.get("state")
 
             transformed_reviewer = {
-                "pull_request_id": pr.get("pull_request_id"),
+                "pull_request_id": pr.get("number"),
                 "target_repository": repo,
                 "date_reviewed": review.get("submitted_at"),
                 "reviewer_email": None,  # TODO Placeholder for reviewer email extraction logic
@@ -385,7 +377,7 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
                     transformed_pr["date_approved"] = approved_date
 
         # Extract and flatten comment data
-        logger.info("Transforming comments for PR #{}".format(pr.get("number")))
+        logger.info(f"Transforming comments for PR #{pr.get('number')}")
         for comment in pr["comment_data"]:
             transformed_comment = {
                 "pull_request_id": pr.get("number"),

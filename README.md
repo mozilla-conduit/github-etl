@@ -110,11 +110,11 @@ authentication methods:
    export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account-key.json"
    ```
 
-1. **Workload Identity** (Recommended for Kubernetes):
+2. **Workload Identity** (Recommended for Kubernetes):
    - Configure Workload Identity on your GKE cluster
    - No explicit credentials file needed
 
-1. **Application Default Credentials** (For local development):
+3. **Application Default Credentials** (For local development):
 
    ```bash
    gcloud auth application-default login
@@ -156,7 +156,7 @@ This setup includes:
 - **Mock GitHub API**: Generates 250 sample pull requests
 - **BigQuery Emulator**: Local BigQuery instance for testing
 - **ETL Service**: Configured to use both mock services
-  
+
 ### Adding Dependencies
 
 Add new Python packages to `requirements.txt` and rebuild the Docker image.
