@@ -460,7 +460,7 @@ def load_data(
 
         logger.info(
             f"Data loading completed successfully for table {table} "
-            + "with {len(load_table_data)} rows"
+            + f"with {len(load_table_data)} rows"
         )
 
 
