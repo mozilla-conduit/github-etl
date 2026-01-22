@@ -59,7 +59,7 @@ def extract_pull_requests(
     # Support custom API URL for mocking/testing
     api_base = github_api_url or "https://api.github.com"
     base_url = f"{api_base}/repos/{repo}/pulls"
-    params = {
+    params: dict = {
         "state": "all",
         "per_page": chunk_size,
         "sort": "created",
@@ -298,7 +298,7 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
     logger = logging.getLogger(__name__)
     logger.info(f"Starting data transformation for {len(raw_data)} PRs")
 
-    transformed_data = {
+    transformed_data: dict = {
         "pull_requests": [],
         "commits": [],
         "reviewers": [],
@@ -371,7 +371,8 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
             }
             transformed_data["reviewers"].append(transformed_reviewer)
 
-            # If the request is approved then store the date in the date_approved for the pull request
+            # If the request is approved then store the date in the
+            # date_approved for the pull request
             if review.get("state") == "APPROVED":
                 approved_date = review.get("submitted_at")
                 if transformed_pr.get(
@@ -422,7 +423,8 @@ def load_data(
     Args:
         client: BigQuery client instance
         dataset_id: BigQuery dataset ID
-        transformed_data: Dictionary containing tables ('pull_requests', 'commits', 'reviewers', 'comments') mapped to lists of row dictionaries
+        transformed_data: Dictionary containing tables ('pull_requests',
+            'commits', 'reviewers', 'comments') mapped to lists of row dictionaries
     """
     logger = logging.getLogger(__name__)
 
@@ -457,7 +459,8 @@ def load_data(
             raise Exception(error_msg)
 
         logger.info(
-            f"Data loading completed successfully for table {table} with {len(load_table_data)} rows"
+            f"Data loading completed successfully for table {table} "
+            + "with {len(load_table_data)} rows"
         )
 
 
@@ -479,7 +482,8 @@ def main() -> int:
     github_token = os.environ.get("GITHUB_TOKEN")
     if not github_token:
         logger.warning(
-            "Warning: No token provided. You will hit very low rate limits and private repos won't work."
+            "Warning: No token provided. You will hit very low rate "
+            + "limits and private repos won't work."
         )
 
     # Read BigQuery configuration
@@ -522,9 +526,10 @@ def main() -> int:
         bigquery_client = bigquery.Client(project=bigquery_project)
 
     # Read GitHub repository configuration
-    github_repos = os.getenv("GITHUB_REPOS")
-    if github_repos:
-        github_repos = github_repos.split(",")
+    github_repos = []
+    github_repos_str = os.getenv("GITHUB_REPOS")
+    if github_repos_str:
+        github_repos = github_repos_str.split(",")
     else:
         raise SystemExit(
             "Environment variable GITHUB_REPOS is required (format: 'owner/repo,owner/repo')"
