@@ -23,7 +23,9 @@ jobs:
       - name: Run flake8
         run: flake8 main.py test_main.py --max-line-length=100 --extend-ignore=E203,W503
       - name: Run mypy
-        run: mypy main.py --no-strict-optional --ignore-missing-imports
+        run: |
+          pip install types-requests
+          mypy main.py --no-strict-optional --ignore-missing-imports
 
   test:
     runs-on: ubuntu-latest
