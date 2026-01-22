@@ -19,22 +19,22 @@ unit tests, integration tests, Docker testing, linting, and CI/CD workflows.
 ## Unit Testing
 
 The test suite in `test_main.py` provides comprehensive coverage for all functions in `main.py`.
-We have **95 unit tests** covering 9 functions with 80%+ code coverage requirement.
+We have unit tests covering 9 functions with 80%+ code coverage requirement.
 
 ### Test Structure
 
 Tests are organized into 10 test classes:
 
-1. **TestSetupLogging** (1 test) - Logging configuration
-2. **TestSleepForRateLimit** (4 tests) - Rate limit handling
-3. **TestExtractPullRequests** (14 tests) - PR extraction with pagination and enrichment
-4. **TestExtractCommits** (9 tests) - Commit and file extraction
-5. **TestExtractReviewers** (6 tests) - Reviewer extraction
-6. **TestExtractComments** (7 tests) - Comment extraction (uses /issues endpoint)
-7. **TestTransformData** (26 tests) - Data transformation for all 4 BigQuery tables
-8. **TestLoadData** (8 tests) - BigQuery data loading
-9. **TestMain** (17 tests) - Main ETL orchestration
-10. **TestIntegration** (3 tests) - End-to-end integration tests (marked with `@pytest.mark.integration`)
+1. **TestSetupLogging** - Logging configuration
+2. **TestSleepForRateLimit** - Rate limit handling
+3. **TestExtractPullRequests** - PR extraction with pagination and enrichment
+4. **TestExtractCommits** - Commit and file extraction
+5. **TestExtractReviewers** - Reviewer extraction
+6. **TestExtractComments** - Comment extraction (uses /issues endpoint)
+7. **TestTransformData** - Data transformation for all 4 BigQuery tables
+8. **TestLoadData** - BigQuery data loading
+9. **TestMain** - Main ETL orchestration
+10. **TestIntegration** - End-to-end integration tests (marked with `@pytest.mark.integration`)
 
 ### Fixtures
 
@@ -51,17 +51,17 @@ Reusable fixtures are defined at the top of `test_main.py`:
 
 ### Function Coverage
 
-| Function | Tests | Coverage Target | Key Test Areas |
-|----------|-------|-----------------|----------------|
-| `setup_logging()` | 1 | 100% | Logger configuration |
-| `sleep_for_rate_limit()` | 4 | 100% | Rate limit sleep logic, edge cases |
-| `extract_pull_requests()` | 14 | 90%+ | Pagination, rate limits, enrichment, error handling |
-| `extract_commits()` | 9 | 85%+ | Commit/file fetching, rate limits, errors |
-| `extract_reviewers()` | 6 | 85%+ | Reviewer states, rate limits, errors |
-| `extract_comments()` | 7 | 85%+ | Comment fetching (via /issues), rate limits |
-| `transform_data()` | 26 | 95%+ | Bug ID extraction, 4 tables, field mapping |
-| `load_data()` | 8 | 90%+ | BigQuery insertion, snapshot dates, errors |
-| `main()` | 17 | 85%+ | Env vars, orchestration, chunking |
+| Function |  Coverage Target | Key Test Areas |
+|----------|------------------|----------------|
+| `setup_logging()` | 100% | Logger configuration |
+| `sleep_for_rate_limit()` | 100% | Rate limit sleep logic, edge cases |
+| `extract_pull_requests()` | 90%+ | Pagination, rate limits, enrichment, error handling |
+| `extract_commits()` | 85%+ | Commit/file fetching, rate limits, errors |
+| `extract_reviewers()` | 85%+ | Reviewer states, rate limits, errors |
+| `extract_comments()` | 85%+ | Comment fetching (via /issues), rate limits |
+| `transform_data()` | 95%+ | Bug ID extraction, 4 tables, field mapping |
+| `load_data()` | 90%+ | BigQuery insertion, snapshot dates, errors |
+| `main()` | 85%+ | Env vars, orchestration, chunking |
 
 **Overall Target: 85-90% coverage** (80% minimum enforced in CI)
 
@@ -318,8 +318,8 @@ docker-compose down
   - 9050 (BigQuery API)
   - 9060 (Discovery/Admin API)
 - **Configuration**: Uses `data.yml` to define the schema
-- **Project**: test-project
-- **Dataset**: test_dataset
+- **Project**: test
+- **Dataset**: github_etl
 - **Table**: pull_requests
 
 ### ETL Service
@@ -328,8 +328,9 @@ The ETL service is configured via environment variables in `docker-compose.yml`:
 
 ```yaml
 environment:
-  GITHUB_REPOS: "mozilla/firefox"
-  GITHUB_API_URL: "http://mock-github-api:5000"  # Points to mock API
+  GITHUB_REPOS: "mozilla-firefox/firefox"
+  GITHUB_TOKEN: ""  # Not needed for mock API
+  GITHUB_API_URL: "http://mock-github-api:5000"
   BIGQUERY_PROJECT: "test"
   BIGQUERY_DATASET: "github_etl"
   BIGQUERY_EMULATOR_HOST: "http://bigquery-emulator:9050"
