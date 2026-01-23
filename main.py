@@ -91,7 +91,7 @@ def extract_pull_requests(
                 f"Extracted page {pages} with {len(batch)} PRs (total: {total})"
             )
 
-            for idx, pr in enumerate(batch):
+            for _idx, pr in enumerate(batch):
                 pr_number = pr.get("number")
                 if not pr_number:
                     continue
@@ -273,7 +273,7 @@ def extract_comments(
     return comments
 
 
-def sleep_for_rate_limit(resp):
+def sleep_for_rate_limit(resp: requests.Response) -> None:
     """Sleep until rate limit resets."""
     remaining = int(resp.headers.get("X-RateLimit-Remaining", 1))
     reset = int(resp.headers.get("X-RateLimit-Reset", 0))

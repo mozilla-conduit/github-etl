@@ -604,7 +604,7 @@ If coverage is below 80%:
 
 ### Tests Pass Locally But Fail in CI
 
-- Check Python version (must be 3.11)
+- Check Python version (must be 3.14)
 - Verify all dependencies are in `requirements.txt`
 - Look for environment-specific issues
 
