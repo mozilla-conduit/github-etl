@@ -66,7 +66,7 @@ docker run --rm \
 
 ### Container Specifications
 
-- **Base Image**: `python:3.11-slim` (latest stable Python)
+- **Base Image**: `python:3.14.2-slim` (latest stable Python)
 - **User**: `app` (uid: 1000, gid: 1000)
 - **Working Directory**: `/app`
 - **Ownership**: All files in `/app` are owned by the `app` user

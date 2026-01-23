@@ -9,16 +9,16 @@ and loads it into a BigQuery dataset using chunked processing.
 import logging
 import os
 import re
-import requests
 import sys
 import time
 from datetime import datetime, timezone
 from typing import Iterator, Optional
 from urllib.parse import parse_qs, urlparse
-from google.cloud import bigquery
+
+import requests
 from google.api_core.client_options import ClientOptions
 from google.auth.credentials import AnonymousCredentials
-
+from google.cloud import bigquery
 
 BUG_RE = re.compile(r"\b(?:bug|b=)\s*#?(\d+)\b", re.I)
 
@@ -29,6 +29,7 @@ def setup_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
+        force=True,
     )
 
 
@@ -58,7 +59,7 @@ def extract_pull_requests(
     # Support custom API URL for mocking/testing
     api_base = github_api_url or "https://api.github.com"
     base_url = f"{api_base}/repos/{repo}/pulls"
-    params = {
+    params: dict = {
         "state": "all",
         "per_page": chunk_size,
         "sort": "created",
@@ -90,7 +91,7 @@ def extract_pull_requests(
                 f"Extracted page {pages} with {len(batch)} PRs (total: {total})"
             )
 
-            for idx, pr in enumerate(batch):
+            for _idx, pr in enumerate(batch):
                 pr_number = pr.get("number")
                 if not pr_number:
                     continue
@@ -272,7 +273,7 @@ def extract_comments(
     return comments
 
 
-def sleep_for_rate_limit(resp):
+def sleep_for_rate_limit(resp: requests.Response) -> None:
     """Sleep until rate limit resets."""
     remaining = int(resp.headers.get("X-RateLimit-Remaining", 1))
     reset = int(resp.headers.get("X-RateLimit-Reset", 0))
@@ -297,7 +298,7 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
     logger = logging.getLogger(__name__)
     logger.info(f"Starting data transformation for {len(raw_data)} PRs")
 
-    transformed_data = {
+    transformed_data: dict = {
         "pull_requests": [],
         "commits": [],
         "reviewers": [],
@@ -324,9 +325,11 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
             "bug_id": bug_id,
             "date_landed": pr.get("merged_at"),
             "date_approved": None,  # This will be filled later
-            "labels": [label.get("name") for label in pr.get("labels", [])]
-            if pr.get("labels")
-            else [],
+            "labels": (
+                [label.get("name") for label in pr.get("labels", [])]
+                if pr.get("labels")
+                else []
+            ),
         }
 
         # Extract and flatten commit data
@@ -368,7 +371,8 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
             }
             transformed_data["reviewers"].append(transformed_reviewer)
 
-            # If the request is approved then store the date in the date_approved for the pull request
+            # If the request is approved then store the date in the
+            # date_approved for the pull request
             if review.get("state") == "APPROVED":
                 approved_date = review.get("submitted_at")
                 if transformed_pr.get(
@@ -386,9 +390,9 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
                 "date_created": comment.get("created_at"),
                 "author_email": None,  # TODO Placeholder for reviewer email extraction logic
                 "author_username": comment.get("user", {}).get("login"),
-                "character_count": len(comment.get("body", ""))
-                if comment.get("body")
-                else 0,
+                "character_count": (
+                    len(comment.get("body", "")) if comment.get("body") else 0
+                ),
                 "status": None,  # TODO
             }
 
@@ -419,7 +423,8 @@ def load_data(
     Args:
         client: BigQuery client instance
         dataset_id: BigQuery dataset ID
-        transformed_data: Dictionary containing tables ('pull_requests', 'commits', 'reviewers', 'comments') mapped to lists of row dictionaries
+        transformed_data: Dictionary containing tables ('pull_requests',
+            'commits', 'reviewers', 'comments') mapped to lists of row dictionaries
     """
     logger = logging.getLogger(__name__)
 
@@ -454,7 +459,8 @@ def load_data(
             raise Exception(error_msg)
 
         logger.info(
-            f"Data loading completed successfully for table {table} with {len(load_table_data)} rows"
+            f"Data loading completed successfully for table {table} "
+            + f"with {len(load_table_data)} rows"
         )
 
 
@@ -476,7 +482,8 @@ def main() -> int:
     github_token = os.environ.get("GITHUB_TOKEN")
     if not github_token:
         logger.warning(
-            "Warning: No token provided. You will hit very low rate limits and private repos won't work."
+            "Warning: No token provided. You will hit very low rate "
+            + "limits and private repos won't work."
         )
 
     # Read BigQuery configuration
@@ -519,9 +526,10 @@ def main() -> int:
         bigquery_client = bigquery.Client(project=bigquery_project)
 
     # Read GitHub repository configuration
-    github_repos = os.getenv("GITHUB_REPOS")
-    if github_repos:
-        github_repos = github_repos.split(",")
+    github_repos = []
+    github_repos_str = os.getenv("GITHUB_REPOS")
+    if github_repos_str:
+        github_repos = github_repos_str.split(",")
     else:
         raise SystemExit(
             "Environment variable GITHUB_REPOS is required (format: 'owner/repo,owner/repo')"
