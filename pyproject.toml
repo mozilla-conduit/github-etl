@@ -69,8 +69,8 @@ split-on-trailing-comma = true
 suppress-none-returning = true
 
 [tool.ruff.lint.per-file-ignores]
-"**/*/tests/*" = ["ANN"]
-"**/*/conftest.py" = ["ANN"]
+"**/tests/*" = ["ANN"]
+"**/conftest.py" = ["ANN"]
 
 # Black configuration
 [tool.black]
