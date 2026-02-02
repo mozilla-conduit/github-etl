@@ -1,0 +1,99 @@
+[project]
+name = "github-etl"
+version = "0.1.0"
+description = "ETL script to extract data from Mozilla Organization Firefox repositories on GitHub and load them into BigQuery"
+readme = "README.md"
+requires-python = ">=3.14"
+license = {text = "MPL-2.0"}
+authors = [
+    {name = "Mozilla", email = "dev-platform@lists.mozilla.org"}
+]
+keywords = ["etl", "github", "bigquery", "mozilla"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL-2.0)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+]
+
+dependencies = [
+    "requests>=2.25.0",
+    "google-cloud-bigquery==3.25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.14.14",
+    "black>=24.0.0",
+]
+
+[project.scripts]
+github-etl = "main:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+# Ruff configuration
+[tool.ruff]
+line-length = 88
+exclude = [
+    ".cache",
+    ".git",
+    ".hg",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+select = ["C", "E", "F", "W", "B", "B9", "I", "ANN"]
+ignore = [
+    "B006",
+    "B904",
+    "C901",
+    "E203",
+    "E501",
+    "ANN002",  # Missing type annotation for *args
+    "ANN003",  # Missing type annotation for **kwargs
+    "ANN202",  # Missing return type annotation for protected function
+]
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = true
+
+[tool.ruff.lint.flake8-annotations]
+suppress-none-returning = true
+
+[tool.ruff.lint.per-file-ignores]
+"**/*/tests/*" = ["ANN"]
+"**/*/conftest.py" = ["ANN"]
+
+# Black configuration
+[tool.black]
+line-length = 88
+target-version = ['py314']
+
+# Pytest configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+]
+markers = [
+    "unit: Unit tests for individual functions",
+    "integration: Integration tests that test multiple components",
+    "slow: Tests that take longer to run",
+]
+log_cli = false
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
