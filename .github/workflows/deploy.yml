@@ -16,7 +16,7 @@ jobs:
       packages: write
     uses: mozilla-it/deploy-actions/.github/workflows/build-and-push.yml@main
     with:
-      image_name: mozilla-conduit/github-etl
+      image_name: github-etl
       gar_name: lando-prod
       project_id: moz-fx-lando-prod
       should_tag_ghcr: true
