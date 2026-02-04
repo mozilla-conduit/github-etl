@@ -11,111 +11,8 @@ import os
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
-import requests
-from google.cloud import bigquery
 
 import main
-
-# =============================================================================
-# FIXTURES
-# =============================================================================
-
-
-@pytest.fixture
-def mock_session():
-    """Provide a mocked requests.Session for testing."""
-    session = Mock(spec=requests.Session)
-    session.headers = {}
-    return session
-
-
-@pytest.fixture
-def mock_bigquery_client():
-    """Provide a mocked BigQuery client for testing."""
-    client = Mock(spec=bigquery.Client)
-    client.project = "test-project"
-    client.insert_rows_json = Mock(return_value=[])
-    return client
-
-
-@pytest.fixture
-def mock_pr_response():
-    """Provide a realistic pull request response for testing."""
-    return {
-        "number": 123,
-        "title": "Bug 1234567 - Fix login issue",
-        "state": "closed",
-        "created_at": "2024-01-01T10:00:00Z",
-        "updated_at": "2024-01-02T10:00:00Z",
-        "merged_at": "2024-01-02T10:00:00Z",
-        "user": {"login": "testuser"},
-        "head": {"ref": "fix-branch"},
-        "base": {"ref": "main"},
-        "labels": [{"name": "bug"}, {"name": "priority-high"}],
-        "commit_data": [],
-        "reviewer_data": [],
-        "comment_data": [],
-    }
-
-
-@pytest.fixture
-def mock_commit_response():
-    """Provide a realistic commit response with files."""
-    return {
-        "sha": "abc123def456",
-        "commit": {
-            "author": {
-                "name": "Test Author",
-                "email": "test@example.com",
-                "date": "2024-01-01T12:00:00Z",
-            }
-        },
-        "files": [
-            {
-                "filename": "src/login.py",
-                "additions": 10,
-                "deletions": 5,
-                "changes": 15,
-            },
-            {
-                "filename": "tests/test_login.py",
-                "additions": 20,
-                "deletions": 2,
-                "changes": 22,
-            },
-        ],
-    }
-
-
-@pytest.fixture
-def mock_reviewer_response():
-    """Provide a realistic reviewer response."""
-    return {
-        "id": 789,
-        "user": {"login": "reviewer1"},
-        "state": "APPROVED",
-        "submitted_at": "2024-01-01T15:00:00Z",
-        "body": "LGTM",
-    }
-
-
-@pytest.fixture
-def mock_comment_response():
-    """Provide a realistic comment response."""
-    return {
-        "id": 456,
-        "user": {"login": "commenter1"},
-        "created_at": "2024-01-01T14:00:00Z",
-        "body": "This looks good to me",
-        "pull_request_review_id": None,
-    }
-
-
-# =============================================================================
-# TEST CLASSES
-# =============================================================================
-
-
 
 # =============================================================================
 # TESTS FOR SETUP_LOGGING
@@ -132,11 +29,9 @@ def test_setup_logging():
 
     # Check that at least one handler is a StreamHandler
     has_stream_handler = any(
-        isinstance(handler, logging.StreamHandler)
-        for handler in root_logger.handlers
+        isinstance(handler, logging.StreamHandler) for handler in root_logger.handlers
     )
     assert has_stream_handler
-
 
 
 # =============================================================================
@@ -206,7 +101,6 @@ def test_sleep_for_rate_limit_with_missing_headers(mock_sleep):
     mock_sleep.assert_not_called()
 
 
-
 # =============================================================================
 # TESTS FOR EXTRACT_PULL_REQUESTS
 # =============================================================================
@@ -236,6 +130,7 @@ def test_extract_pull_requests_basic(mock_session):
     assert len(result[0]) == 2
     assert result[0][0]["number"] == 1
     assert result[0][1]["number"] == 2
+
 
 def test_extract_multiple_pages(mock_session):
     """Test extracting data across multiple pages with pagination."""
@@ -271,6 +166,7 @@ def test_extract_multiple_pages(mock_session):
     assert result[0][0]["number"] == 1
     assert result[1][0]["number"] == 3
 
+
 def test_enriches_prs_with_commit_data(mock_session):
     """Test that PRs are enriched with commit data."""
     mock_response = Mock()
@@ -293,6 +189,7 @@ def test_enriches_prs_with_commit_data(mock_session):
 
     assert result[0][0]["commit_data"] == mock_commits
     mock_extract_commits.assert_called_once()
+
 
 def test_enriches_prs_with_reviewer_data(mock_session):
     """Test that PRs are enriched with reviewer data."""
@@ -317,6 +214,7 @@ def test_enriches_prs_with_reviewer_data(mock_session):
     assert result[0][0]["reviewer_data"] == mock_reviewers
     mock_extract_reviewers.assert_called_once()
 
+
 def test_enriches_prs_with_comment_data(mock_session):
     """Test that PRs are enriched with comment data."""
     mock_response = Mock()
@@ -339,6 +237,7 @@ def test_enriches_prs_with_comment_data(mock_session):
 
     assert result[0][0]["comment_data"] == mock_comments
     mock_extract_comments.assert_called_once()
+
 
 @patch("main.sleep_for_rate_limit")
 def test_handles_rate_limit(mock_sleep, mock_session):
@@ -369,6 +268,7 @@ def test_handles_rate_limit(mock_sleep, mock_session):
     mock_sleep.assert_called_once_with(mock_response_rate_limit)
     assert len(result) == 1
 
+
 def test_handles_api_error_404(mock_session):
     """Test that extract_pull_requests raises SystemExit on 404."""
     mock_response = Mock()
@@ -382,6 +282,7 @@ def test_handles_api_error_404(mock_session):
 
     assert "GitHub API error 404" in str(exc_info.value)
 
+
 def test_handles_api_error_500(mock_session):
     """Test that extract_pull_requests raises SystemExit on 500."""
     mock_response = Mock()
@@ -394,6 +295,7 @@ def test_handles_api_error_500(mock_session):
         list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
     assert "GitHub API error 500" in str(exc_info.value)
+
 
 def test_stops_on_empty_batch(mock_session):
     """Test that extraction stops when an empty batch is returned."""
@@ -424,6 +326,7 @@ def test_stops_on_empty_batch(mock_session):
     assert len(result) == 1
     assert len(result[0]) == 1
 
+
 def test_invalid_page_number_handling(mock_session):
     """Test handling of invalid page number in pagination."""
     mock_response_1 = Mock()
@@ -446,6 +349,7 @@ def test_invalid_page_number_handling(mock_session):
 
     # Should stop pagination on invalid page number
     assert len(result) == 1
+
 
 def test_custom_github_api_url(mock_session):
     """Test using custom GitHub API URL."""
@@ -473,6 +377,7 @@ def test_custom_github_api_url(mock_session):
     call_args = mock_session.get.call_args
     assert custom_url in call_args[0][0]
 
+
 def test_skips_prs_without_number_field(mock_session):
     """Test that PRs without 'number' field are skipped."""
     mock_response = Mock()
@@ -497,11 +402,13 @@ def test_skips_prs_without_number_field(mock_session):
     assert mock_commits.call_count == 2
 
 
-
 # =============================================================================
 # TESTS FOR EXTRACT_COMMITS
 # =============================================================================
 
+
+def test_extract_commits_with_files(mock_session):
+    """Test extracting commits with file details."""
     # Mock commits list response
     commits_response = Mock()
     commits_response.status_code = 200
@@ -539,6 +446,7 @@ def test_skips_prs_without_number_field(mock_session):
     assert result[1]["sha"] == "def456"
     assert result[1]["files"][0]["filename"] == "file2.py"
 
+
 def test_multiple_files_per_commit(mock_session):
     """Test handling multiple files in a single commit."""
     commits_response = Mock()
@@ -563,6 +471,7 @@ def test_multiple_files_per_commit(mock_session):
     assert len(result) == 1
     assert len(result[0]["files"]) == 3
 
+
 @patch("main.sleep_for_rate_limit")
 def test_rate_limit_on_commits_list(mock_sleep, mock_session):
     """Test rate limit handling when fetching commits list."""
@@ -583,6 +492,7 @@ def test_rate_limit_on_commits_list(mock_sleep, mock_session):
     mock_sleep.assert_called_once()
     assert result == []
 
+
 def test_api_error_on_commits_list(mock_session):
     """Test API error handling when fetching commits list."""
     error_response = Mock()
@@ -595,6 +505,7 @@ def test_api_error_on_commits_list(mock_session):
         main.extract_commits(mock_session, "mozilla/firefox", 123)
 
     assert "GitHub API error 500" in str(exc_info.value)
+
 
 def test_api_error_on_individual_commit(mock_session):
     """Test API error when fetching individual commit details."""
@@ -612,6 +523,7 @@ def test_api_error_on_individual_commit(mock_session):
         main.extract_commits(mock_session, "mozilla/firefox", 123)
 
     assert "GitHub API error 404" in str(exc_info.value)
+
 
 def test_commit_without_sha_field(mock_session):
     """Test handling commits without sha field."""
@@ -641,7 +553,8 @@ def test_commit_without_sha_field(mock_session):
     # Should handle the commit without sha gracefully
     assert len(result) == 2
 
-def test_custom_github_api_url(mock_session):
+
+def test_custom_github_api_url_commits(mock_session):
     """Test using custom GitHub API URL for commits."""
     custom_url = "https://mock-github.example.com"
 
@@ -658,6 +571,7 @@ def test_custom_github_api_url(mock_session):
     call_args = mock_session.get.call_args
     assert custom_url in call_args[0][0]
 
+
 def test_empty_commits_list(mock_session):
     """Test handling PR with no commits."""
     commits_response = Mock()
@@ -671,11 +585,13 @@ def test_empty_commits_list(mock_session):
     assert result == []
 
 
-
 # =============================================================================
 # TESTS FOR EXTRACT_REVIEWERS
 # =============================================================================
 
+
+def test_extract_reviewers_basic(mock_session):
+    """Test basic extraction of reviewers."""
     reviewers_response = Mock()
     reviewers_response.status_code = 200
     reviewers_response.json.return_value = [
@@ -701,6 +617,7 @@ def test_empty_commits_list(mock_session):
     assert result[0]["state"] == "APPROVED"
     assert result[1]["state"] == "CHANGES_REQUESTED"
 
+
 def test_multiple_review_states(mock_session):
     """Test handling multiple different review states."""
     reviewers_response = Mock()
@@ -722,6 +639,7 @@ def test_multiple_review_states(mock_session):
     assert "CHANGES_REQUESTED" in states
     assert "COMMENTED" in states
 
+
 def test_empty_reviewers_list(mock_session):
     """Test handling PR with no reviewers."""
     reviewers_response = Mock()
@@ -733,6 +651,7 @@ def test_empty_reviewers_list(mock_session):
     result = main.extract_reviewers(mock_session, "mozilla/firefox", 123)
 
     assert result == []
+
 
 @patch("main.sleep_for_rate_limit")
 def test_rate_limit_handling(mock_sleep, mock_session):
@@ -752,6 +671,7 @@ def test_rate_limit_handling(mock_sleep, mock_session):
     mock_sleep.assert_called_once()
     assert result == []
 
+
 def test_api_error(mock_session):
     """Test API error handling when fetching reviewers."""
     error_response = Mock()
@@ -765,7 +685,8 @@ def test_api_error(mock_session):
 
     assert "GitHub API error 500" in str(exc_info.value)
 
-def test_custom_github_api_url(mock_session):
+
+def test_custom_github_api_url_reviewers(mock_session):
     """Test using custom GitHub API URL for reviewers."""
     custom_url = "https://mock-github.example.com"
 
@@ -783,11 +704,13 @@ def test_custom_github_api_url(mock_session):
     assert custom_url in call_args[0][0]
 
 
-
 # =============================================================================
 # TESTS FOR EXTRACT_COMMENTS
 # =============================================================================
 
+
+def test_extract_comments_basic(mock_session):
+    """Test basic extraction of comments."""
     comments_response = Mock()
     comments_response.status_code = 200
     comments_response.json.return_value = [
@@ -813,6 +736,7 @@ def test_custom_github_api_url(mock_session):
     assert result[0]["id"] == 456
     assert result[1]["id"] == 457
 
+
 def test_uses_issues_endpoint(mock_session):
     """Test that comments use /issues endpoint not /pulls."""
     comments_response = Mock()
@@ -827,6 +751,7 @@ def test_uses_issues_endpoint(mock_session):
     url = call_args[0][0]
     assert "/issues/123/comments" in url
     assert "/pulls/123/comments" not in url
+
 
 def test_multiple_comments(mock_session):
     """Test handling multiple comments."""
@@ -843,6 +768,7 @@ def test_multiple_comments(mock_session):
 
     assert len(result) == 10
 
+
 def test_empty_comments_list(mock_session):
     """Test handling PR with no comments."""
     comments_response = Mock()
@@ -855,8 +781,9 @@ def test_empty_comments_list(mock_session):
 
     assert result == []
 
+
 @patch("main.sleep_for_rate_limit")
-def test_rate_limit_handling(mock_sleep, mock_session):
+def test_rate_limit_handling_comments(mock_sleep, mock_session):
     """Test rate limit handling when fetching comments."""
     rate_limit_response = Mock()
     rate_limit_response.status_code = 403
@@ -873,7 +800,8 @@ def test_rate_limit_handling(mock_sleep, mock_session):
     mock_sleep.assert_called_once()
     assert result == []
 
-def test_api_error(mock_session):
+
+def test_api_error_comments(mock_session):
     """Test API error handling when fetching comments."""
     error_response = Mock()
     error_response.status_code = 404
@@ -886,7 +814,8 @@ def test_api_error(mock_session):
 
     assert "GitHub API error 404" in str(exc_info.value)
 
-def test_custom_github_api_url(mock_session):
+
+def test_custom_github_api_url_comments(mock_session):
     """Test using custom GitHub API URL for comments."""
     custom_url = "https://mock-github.example.com"
 
@@ -904,11 +833,13 @@ def test_custom_github_api_url(mock_session):
     assert custom_url in call_args[0][0]
 
 
-
 # =============================================================================
 # TESTS FOR TRANSFORM_DATA
 # =============================================================================
 
+
+def test_transform_data_basic():
+    """Test basic transformation of pull request data."""
     raw_data = [
         {
             "number": 123,
@@ -935,6 +866,7 @@ def test_custom_github_api_url(mock_session):
     assert pr["date_landed"] == "2024-01-02T12:00:00Z"
     assert pr["target_repository"] == "mozilla/firefox"
 
+
 def test_bug_id_extraction_basic():
     """Test bug ID extraction from PR title."""
     test_cases = [
@@ -960,6 +892,7 @@ def test_bug_id_extraction_basic():
         result = main.transform_data(raw_data, "mozilla/firefox")
         assert result["pull_requests"][0]["bug_id"] == expected_bug_id
 
+
 def test_bug_id_extraction_with_hash():
     """Test bug ID extraction with # symbol."""
     raw_data = [
@@ -976,6 +909,7 @@ def test_bug_id_extraction_with_hash():
 
     result = main.transform_data(raw_data, "mozilla/firefox")
     assert result["pull_requests"][0]["bug_id"] == 1234567
+
 
 def test_bug_id_filter_large_numbers():
     """Test that bug IDs >= 100000000 are filtered out."""
@@ -994,6 +928,7 @@ def test_bug_id_filter_large_numbers():
     result = main.transform_data(raw_data, "mozilla/firefox")
     assert result["pull_requests"][0]["bug_id"] is None
 
+
 def test_bug_id_no_match():
     """Test PR title with no bug ID."""
     raw_data = [
@@ -1010,6 +945,7 @@ def test_bug_id_no_match():
 
     result = main.transform_data(raw_data, "mozilla/firefox")
     assert result["pull_requests"][0]["bug_id"] is None
+
 
 def test_labels_extraction():
     """Test labels array extraction."""
@@ -1036,6 +972,7 @@ def test_labels_extraction():
     assert "priority-high" in labels
     assert "needs-review" in labels
 
+
 def test_labels_empty_list():
     """Test handling empty labels list."""
     raw_data = [
@@ -1052,6 +989,7 @@ def test_labels_empty_list():
 
     result = main.transform_data(raw_data, "mozilla/firefox")
     assert result["pull_requests"][0]["labels"] == []
+
 
 def test_commit_transformation():
     """Test commit fields mapping."""
@@ -1097,6 +1035,7 @@ def test_commit_transformation():
     assert commit["lines_added"] == 10
     assert commit["lines_removed"] == 5
 
+
 def test_commit_file_flattening():
     """Test that each file becomes a separate row."""
     raw_data = [
@@ -1129,6 +1068,7 @@ def test_commit_file_flattening():
     assert "file1.py" in filenames
     assert "file2.py" in filenames
     assert "file3.py" in filenames
+
 
 def test_multiple_commits_with_files():
     """Test multiple commits with multiple files per PR."""
@@ -1168,6 +1108,7 @@ def test_multiple_commits_with_files():
     assert result["commits"][1]["commit_sha"] == "commit2"
     assert result["commits"][2]["commit_sha"] == "commit2"
 
+
 def test_reviewer_transformation():
     """Test reviewer fields mapping."""
     raw_data = [
@@ -1199,8 +1140,9 @@ def test_reviewer_transformation():
     assert reviewer["status"] == "APPROVED"
     assert reviewer["date_reviewed"] == "2024-01-01T15:00:00Z"
 
-def test_multiple_review_states():
-    """Test handling multiple review states."""
+
+def test_transform_multiple_review_states():
+    """Test transforming data with multiple review states."""
     raw_data = [
         {
             "number": 123,
@@ -1240,6 +1182,7 @@ def test_multiple_review_states():
     assert "CHANGES_REQUESTED" in states
     assert "COMMENTED" in states
 
+
 def test_date_approved_from_earliest_approval():
     """Test that date_approved is set to earliest APPROVED review."""
     raw_data = [
@@ -1278,6 +1221,7 @@ def test_date_approved_from_earliest_approval():
     pr = result["pull_requests"][0]
     assert pr["date_approved"] == "2024-01-01T14:00:00Z"
 
+
 def test_comment_transformation():
     """Test comment fields mapping."""
     raw_data = [
@@ -1311,6 +1255,7 @@ def test_comment_transformation():
     assert comment["date_created"] == "2024-01-01T14:00:00Z"
     assert comment["character_count"] == 17
 
+
 def test_comment_character_count():
     """Test character count calculation for comments."""
     raw_data = [
@@ -1342,6 +1287,7 @@ def test_comment_character_count():
 
     assert result["comments"][0]["character_count"] == 5
     assert result["comments"][1]["character_count"] == 44
+
 
 def test_comment_status_from_review():
     """Test that comment status is mapped from review_id_statuses."""
@@ -1377,6 +1323,7 @@ def test_comment_status_from_review():
     # Comment should have status from the review
     assert result["comments"][0]["status"] == "APPROVED"
 
+
 def test_comment_empty_body():
     """Test handling comments with empty or None body."""
     raw_data = [
@@ -1409,6 +1356,7 @@ def test_comment_empty_body():
     assert result["comments"][0]["character_count"] == 0
     assert result["comments"][1]["character_count"] == 0
 
+
 def test_empty_raw_data():
     """Test handling empty input list."""
     result = main.transform_data([], "mozilla/firefox")
@@ -1417,6 +1365,7 @@ def test_empty_raw_data():
     assert result["commits"] == []
     assert result["reviewers"] == []
     assert result["comments"] == []
+
 
 def test_pr_without_commits_reviewers_comments():
     """Test PR with no commits, reviewers, or comments."""
@@ -1438,6 +1387,7 @@ def test_pr_without_commits_reviewers_comments():
     assert len(result["commits"]) == 0
     assert len(result["reviewers"]) == 0
     assert len(result["comments"]) == 0
+
 
 def test_return_structure():
     """Test that transform_data returns dict with 4 keys."""
@@ -1461,6 +1411,7 @@ def test_return_structure():
     assert "reviewers" in result
     assert "comments" in result
 
+
 def test_all_tables_have_target_repository():
     """Test that all tables include target_repository field."""
     raw_data = [
@@ -1473,9 +1424,7 @@ def test_all_tables_have_target_repository():
                 {
                     "sha": "abc",
                     "commit": {"author": {"name": "Author", "date": "2024-01-01"}},
-                    "files": [
-                        {"filename": "test.py", "additions": 1, "deletions": 0}
-                    ],
+                    "files": [{"filename": "test.py", "additions": 1, "deletions": 0}],
                 }
             ],
             "reviewer_data": [
@@ -1505,7 +1454,6 @@ def test_all_tables_have_target_repository():
     assert result["comments"][0]["target_repository"] == "mozilla/firefox"
 
 
-
 # =============================================================================
 # TESTS FOR LOAD_DATA
 # =============================================================================
@@ -1528,6 +1476,7 @@ def test_load_data_inserts_all_tables(mock_datetime, mock_bigquery_client):
     # Should call insert_rows_json 4 times (once per table)
     assert mock_bigquery_client.insert_rows_json.call_count == 4
 
+
 @patch("main.datetime")
 def test_adds_snapshot_date(mock_datetime, mock_bigquery_client):
     """Test that snapshot_date is added to all rows."""
@@ -1546,6 +1495,7 @@ def test_adds_snapshot_date(mock_datetime, mock_bigquery_client):
     rows = call_args[0][1]
     assert all(row["snapshot_date"] == "2024-01-15" for row in rows)
 
+
 def test_constructs_correct_table_ref(mock_bigquery_client):
     """Test that table_ref is constructed correctly."""
     transformed_data = {
@@ -1561,6 +1511,7 @@ def test_constructs_correct_table_ref(mock_bigquery_client):
     table_ref = call_args[0][0]
     assert table_ref == "test-project.my_dataset.pull_requests"
 
+
 def test_empty_transformed_data_skipped(mock_bigquery_client):
     """Test that empty transformed_data dict is skipped."""
     transformed_data = {}
@@ -1568,6 +1519,7 @@ def test_empty_transformed_data_skipped(mock_bigquery_client):
     main.load_data(mock_bigquery_client, "test_dataset", transformed_data)
 
     mock_bigquery_client.insert_rows_json.assert_not_called()
+
 
 def test_skips_empty_tables_individually(mock_bigquery_client):
     """Test that empty tables are skipped individually."""
@@ -1583,6 +1535,7 @@ def test_skips_empty_tables_individually(mock_bigquery_client):
     # Should only call insert_rows_json twice (for PRs and comments)
     assert mock_bigquery_client.insert_rows_json.call_count == 2
 
+
 def test_only_pull_requests_table(mock_bigquery_client):
     """Test loading only pull_requests table."""
     transformed_data = {
@@ -1595,6 +1548,7 @@ def test_only_pull_requests_table(mock_bigquery_client):
     main.load_data(mock_bigquery_client, "test_dataset", transformed_data)
 
     assert mock_bigquery_client.insert_rows_json.call_count == 1
+
 
 def test_raises_exception_on_insert_errors(mock_bigquery_client):
     """Test that Exception is raised on BigQuery insert errors."""
@@ -1614,6 +1568,7 @@ def test_raises_exception_on_insert_errors(mock_bigquery_client):
 
     assert "BigQuery insert errors" in str(exc_info.value)
 
+
 def test_verifies_client_insert_called_correctly(mock_bigquery_client):
     """Test that client.insert_rows_json is called with correct arguments."""
     transformed_data = {
@@ -1630,7 +1585,6 @@ def test_verifies_client_insert_called_correctly(mock_bigquery_client):
 
     assert "pull_requests" in table_ref
     assert len(rows) == 2
-
 
 
 # =============================================================================
@@ -1657,7 +1611,9 @@ def test_requires_github_repos(mock_session_class, mock_bq_client, mock_setup_lo
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_requires_bigquery_project(mock_session_class, mock_bq_client, mock_setup_logging):
+def test_requires_bigquery_project(
+    mock_session_class, mock_bq_client, mock_setup_logging
+):
     """Test that BIGQUERY_PROJECT is required."""
     with patch.dict(
         os.environ,
@@ -1673,7 +1629,9 @@ def test_requires_bigquery_project(mock_session_class, mock_bq_client, mock_setu
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_requires_bigquery_dataset(mock_session_class, mock_bq_client, mock_setup_logging):
+def test_requires_bigquery_dataset(
+    mock_session_class, mock_bq_client, mock_setup_logging
+):
     """Test that BIGQUERY_DATASET is required."""
     with patch.dict(
         os.environ,
@@ -1685,10 +1643,13 @@ def test_requires_bigquery_dataset(mock_session_class, mock_bq_client, mock_setu
 
         assert "BIGQUERY_DATASET" in str(exc_info.value)
 
+
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_github_token_optional_with_warning(mock_session_class, mock_bq_client, mock_setup_logging):
+def test_github_token_optional_with_warning(
+    mock_session_class, mock_bq_client, mock_setup_logging
+):
     """Test that GITHUB_TOKEN is optional but warns if missing."""
     with (
         patch.dict(
@@ -1706,10 +1667,13 @@ def test_github_token_optional_with_warning(mock_session_class, mock_bq_client, 
         result = main.main()
         assert result == 0
 
+
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_splits_github_repos_by_comma(mock_session_class, mock_bq_client, mock_setup_logging):
+def test_splits_github_repos_by_comma(
+    mock_session_class, mock_bq_client, mock_setup_logging
+):
     """Test that GITHUB_REPOS is split by comma."""
     with (
         patch.dict(
@@ -1728,6 +1692,7 @@ def test_splits_github_repos_by_comma(mock_session_class, mock_bq_client, mock_s
 
         # Should be called twice (once per repo)
         assert mock_extract.call_count == 2
+
 
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
@@ -1753,10 +1718,13 @@ def test_honors_github_api_url(mock_session_class, mock_bq_client, mock_setup_lo
         call_kwargs = mock_extract.call_args[1]
         assert call_kwargs["github_api_url"] == "https://custom-api.example.com"
 
+
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_honors_bigquery_emulator_host(mock_session_class, mock_bq_client_class, mock_setup_logging):
+def test_honors_bigquery_emulator_host(
+    mock_session_class, mock_bq_client_class, mock_setup_logging
+):
     """Test that BIGQUERY_EMULATOR_HOST is honored."""
     with (
         patch.dict(
@@ -1777,10 +1745,13 @@ def test_honors_bigquery_emulator_host(mock_session_class, mock_bq_client_class,
         # Verify BigQuery client was created with emulator settings
         mock_bq_client_class.assert_called_once()
 
+
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_creates_session_with_headers(mock_session_class, mock_bq_client, mock_setup_logging):
+def test_creates_session_with_headers(
+    mock_session_class, mock_bq_client, mock_setup_logging
+):
     """Test that session is created with Accept and User-Agent headers."""
     mock_session = MagicMock()
     mock_session_class.return_value = mock_session
@@ -1806,10 +1777,13 @@ def test_creates_session_with_headers(mock_session_class, mock_bq_client, mock_s
         assert "Accept" in call_args
         assert "User-Agent" in call_args
 
+
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_sets_authorization_header_with_token(mock_session_class, mock_bq_client, mock_setup_logging):
+def test_sets_authorization_header_with_token(
+    mock_session_class, mock_bq_client, mock_setup_logging
+):
     """Test that Authorization header is set when token provided."""
     mock_session = MagicMock()
     mock_session_class.return_value = mock_session
@@ -1831,6 +1805,7 @@ def test_sets_authorization_header_with_token(mock_session_class, mock_bq_client
 
         # Verify Authorization header was set
         assert mock_session.headers.__setitem__.called
+
 
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
@@ -1872,6 +1847,7 @@ def test_single_repo_successful_etl(
     mock_transform.assert_called_once()
     mock_load.assert_called_once()
 
+
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
@@ -1910,6 +1886,7 @@ def test_multiple_repos_processing(
     assert result == 0
     # Should process 3 repositories
     assert mock_extract.call_count == 3
+
 
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
@@ -1958,10 +1935,13 @@ def test_processes_chunks_iteratively(
     assert mock_transform.call_count == 3
     assert mock_load.call_count == 3
 
+
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_returns_zero_on_success(mock_session_class, mock_bq_client, mock_setup_logging):
+def test_returns_zero_on_success(
+    mock_session_class, mock_bq_client, mock_setup_logging
+):
     """Test that main returns 0 on success."""
     with (
         patch.dict(
@@ -1986,7 +1966,9 @@ def test_returns_zero_on_success(mock_session_class, mock_bq_client, mock_setup_
 @patch("main.load_data")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_full_etl_flow_transforms_data_correctly(mock_session_class, mock_bq_client, mock_load, mock_setup_logging):
+def test_full_etl_flow_transforms_data_correctly(
+    mock_session_class, mock_bq_client, mock_load, mock_setup_logging
+):
     """Test full ETL flow with mocked GitHub responses."""
     mock_session = MagicMock()
     mock_session_class.return_value = mock_session
@@ -2032,11 +2014,14 @@ def test_full_etl_flow_transforms_data_correctly(mock_session_class, mock_bq_cli
     assert "pull_requests" in transformed_data
     assert len(transformed_data["pull_requests"]) == 1
 
+
 @patch("main.setup_logging")
 @patch("main.load_data")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_bug_id_extraction_through_pipeline(mock_session_class, mock_bq_client, mock_load, mock_setup_logging):
+def test_bug_id_extraction_through_pipeline(
+    mock_session_class, mock_bq_client, mock_load, mock_setup_logging
+):
     """Test bug ID extraction through full pipeline."""
     mock_session = MagicMock()
     mock_session_class.return_value = mock_session
@@ -2080,11 +2065,14 @@ def test_bug_id_extraction_through_pipeline(mock_session_class, mock_bq_client, 
     pr = transformed_data["pull_requests"][0]
     assert pr["bug_id"] == 9876543
 
+
 @patch("main.setup_logging")
 @patch("main.load_data")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_pagination_through_full_flow(mock_session_class, mock_bq_client, mock_load, mock_setup_logging):
+def test_pagination_through_full_flow(
+    mock_session_class, mock_bq_client, mock_load, mock_setup_logging
+):
     """Test pagination through full ETL flow."""
     mock_session = MagicMock()
     mock_session_class.return_value = mock_session
@@ -2092,9 +2080,7 @@ def test_pagination_through_full_flow(mock_session_class, mock_bq_client, mock_l
     # First page
     pr_response_1 = Mock()
     pr_response_1.status_code = 200
-    pr_response_1.json.return_value = [
-        {"number": 1, "title": "PR 1", "state": "open"}
-    ]
+    pr_response_1.json.return_value = [{"number": 1, "title": "PR 1", "state": "open"}]
     pr_response_1.links = {
         "next": {"url": "https://api.github.com/repos/mozilla/firefox/pulls?page=2"}
     }
@@ -2102,9 +2088,7 @@ def test_pagination_through_full_flow(mock_session_class, mock_bq_client, mock_l
     # Second page
     pr_response_2 = Mock()
     pr_response_2.status_code = 200
-    pr_response_2.json.return_value = [
-        {"number": 2, "title": "PR 2", "state": "open"}
-    ]
+    pr_response_2.json.return_value = [{"number": 2, "title": "PR 2", "state": "open"}]
     pr_response_2.links = {}
 
     empty_response = Mock()
