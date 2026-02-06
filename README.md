@@ -66,7 +66,7 @@ docker run --rm \
 
 ### Container Specifications
 
-- **Base Image**: `python:3.11-slim` (latest stable Python)
+- **Base Image**: `python:3.14.2-slim` (latest stable Python)
 - **User**: `app` (uid: 1000, gid: 1000)
 - **Working Directory**: `/app`
 - **Ownership**: All files in `/app` are owned by the `app` user
@@ -156,6 +156,97 @@ This setup includes:
 - **Mock GitHub API**: Generates 250 sample pull requests
 - **BigQuery Emulator**: Local BigQuery instance for testing
 - **ETL Service**: Configured to use both mock services
+
+### Running Tests
+
+The project includes a comprehensive test suite using pytest. Tests are organized in the `test/` directory and include both unit and integration tests.
+
+#### Setting Up the Development Environment
+
+1. **Install Python 3.14** (or your compatible Python version)
+
+2. **Install development dependencies**:
+
+   ```bash
+   # Install the package with dev dependencies
+   pip install -e ".[dev]"
+   ```
+
+   This installs:
+   - `pytest` - Testing framework
+   - `pytest-mock` - Mocking utilities for tests
+   - `ruff` - Linter
+   - `black` - Code formatter
+
+3. **Verify installation**:
+
+   ```bash
+   pytest --version
+   ```
+
+#### Running the Tests
+
+Run all tests:
+
+```bash
+pytest
+```
+
+Run tests with verbose output:
+
+```bash
+pytest -v
+```
+
+Run specific test files:
+
+```bash
+pytest tests/test_extract_pull_requests.py
+pytest tests/test_transform_data.py
+```
+
+Run tests by marker:
+
+```bash
+# Run only unit tests
+pytest -m unit
+
+# Run only integration tests
+pytest -m integration
+
+# Skip slow tests
+pytest -m "not slow"
+```
+
+Run tests with coverage reporting:
+
+```bash
+pytest --cov=. --cov-report=html
+```
+
+#### Test Organization
+
+The test suite is organized into the following files:
+
+- `tests/conftest.py` - Shared pytest fixtures and test configuration
+- `tests/test_extract_pull_requests.py` - Tests for PR extraction logic
+- `tests/test_extract_commits.py` - Tests for commit extraction
+- `tests/test_extract_comments.py` - Tests for comment extraction
+- `tests/test_extract_reviewers.py` - Tests for reviewer extraction
+- `tests/test_transform_data.py` - Tests for data transformation
+- `tests/test_load_data.py` - Tests for BigQuery loading
+- `tests/test_rate_limit.py` - Tests for rate limit handling
+- `tests/test_main_integration.py` - End-to-end integration tests
+- `tests/test_logging.py` - Tests for logging setup
+- `tests/test_formatting.py` - Code formatting tests
+
+#### Test Markers
+
+Tests are marked with the following pytest markers:
+
+- `@pytest.mark.unit` - Unit tests for individual functions
+- `@pytest.mark.integration` - Integration tests across multiple components
+- `@pytest.mark.slow` - Tests that take longer to run
 
 ### Adding Dependencies
 
