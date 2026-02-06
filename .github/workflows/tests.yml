@@ -23,10 +23,9 @@ jobs:
   integration-test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Run integration test with docker compose
-      run: |
-        docker compose up --build --abort-on-container-exit --exit-code-from github-etl
-    - name: Cleanup
-      if: always()
-      run: docker compose down -v
+      - uses: actions/checkout@v4
+      - name: Run integration test with docker compose
+        run: |
+          docker compose up --build --abort-on-container-exit --exit-code-from github-etl
+      - name: Cleanup
+        run: docker compose down -v

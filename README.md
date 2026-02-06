@@ -201,8 +201,8 @@ pytest -v
 Run specific test files:
 
 ```bash
-pytest test/test_extract_pull_requests.py
-pytest test/test_transform_data.py
+pytest tests/test_extract_pull_requests.py
+pytest tests/test_transform_data.py
 ```
 
 Run tests by marker:
@@ -228,17 +228,17 @@ pytest --cov=. --cov-report=html
 
 The test suite is organized into the following files:
 
-- `test/conftest.py` - Shared pytest fixtures and test configuration
-- `test/test_extract_pull_requests.py` - Tests for PR extraction logic
-- `test/test_extract_commits.py` - Tests for commit extraction
-- `test/test_extract_comments.py` - Tests for comment extraction
-- `test/test_extract_reviewers.py` - Tests for reviewer extraction
-- `test/test_transform_data.py` - Tests for data transformation
-- `test/test_load_data.py` - Tests for BigQuery loading
-- `test/test_rate_limit.py` - Tests for rate limit handling
-- `test/test_main_integration.py` - End-to-end integration tests
-- `test/test_logging.py` - Tests for logging setup
-- `test/test_formatting.py` - Code formatting tests
+- `tests/conftest.py` - Shared pytest fixtures and test configuration
+- `tests/test_extract_pull_requests.py` - Tests for PR extraction logic
+- `tests/test_extract_commits.py` - Tests for commit extraction
+- `tests/test_extract_comments.py` - Tests for comment extraction
+- `tests/test_extract_reviewers.py` - Tests for reviewer extraction
+- `tests/test_transform_data.py` - Tests for data transformation
+- `tests/test_load_data.py` - Tests for BigQuery loading
+- `tests/test_rate_limit.py` - Tests for rate limit handling
+- `tests/test_main_integration.py` - End-to-end integration tests
+- `tests/test_logging.py` - Tests for logging setup
+- `tests/test_formatting.py` - Code formatting tests
 
 #### Test Markers
 
