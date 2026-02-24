@@ -62,7 +62,7 @@ def get_installation_access_token(
     headers = {
         "Authorization": f"Bearer {jwt}",
         "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
     installation_id = _repo_installation_cache.get(repo)
