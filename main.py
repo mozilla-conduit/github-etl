@@ -30,7 +30,7 @@ class _AccessToken:
     expires_at: datetime
 
 
-_access_token_cache: Optional[_AccessToken] = None
+_access_token_cache: dict[int, _AccessToken] = {}
 
 
 def get_installation_access_token(
@@ -42,8 +42,9 @@ def get_installation_access_token(
     Get a GitHub App installation access token, returning a cached one if still valid.
 
     Uses the JWT to look up the installation for the given repo, then exchanges
-    it for an installation access token (valid for 1 hour). The token is cached
-    and reused until it has less than 60 seconds remaining.
+    it for an installation access token (valid for 1 hour). Tokens are cached
+    per installation ID so that repos sharing an installation reuse the same token,
+    while repos on different installations each get their own.
 
     Args:
         jwt: GitHub App JWT (stored in GITHUB_TOKEN env var)
@@ -53,17 +54,8 @@ def get_installation_access_token(
     Returns:
         Installation access token string
     """
-    global _access_token_cache
     logger = logging.getLogger(__name__)
 
-    now = datetime.now(timezone.utc)
-    if (
-        _access_token_cache is not None
-        and _access_token_cache.expires_at > now + timedelta(seconds=60)
-    ):
-        return _access_token_cache.token
-
-    logger.info("Fetching new GitHub App installation access token")
     api_base = github_api_url or "https://api.github.com"
     headers = {
         "Authorization": f"Bearer {jwt}",
@@ -76,25 +68,48 @@ def get_installation_access_token(
             f"Failed to get GitHub App installation for {repo}: "
             f"{resp.status_code}: {resp.text}"
         )
-    installation_id = resp.json()["id"]
+    try:
+        installation_id = resp.json()["id"]
+    except (requests.exceptions.JSONDecodeError, KeyError) as e:
+        raise SystemExit(
+            f"Failed to parse installation response for {repo}: {e}: {resp.text}"
+        )
 
+    now = datetime.now(timezone.utc)
+    cached = _access_token_cache.get(installation_id)
+    if cached is not None and cached.expires_at > now + timedelta(seconds=60):
+        return cached.token
+
+    logger.info(
+        f"Fetching new GitHub App installation access token for installation {installation_id}"
+    )
     resp = requests.post(
         f"{api_base}/app/installations/{installation_id}/access_tokens",
         headers=headers,
     )
     if resp.status_code != 201:
         raise SystemExit(
-            f"Failed to get installation access token: "
-            f"{resp.status_code}: {resp.text}"
+            f"Failed to get installation access token: {resp.status_code}: {resp.text}"
         )
 
-    data = resp.json()
-    _access_token_cache = _AccessToken(
-        token=data["token"],
-        expires_at=datetime.fromisoformat(data["expires_at"]),
-    )
-    logger.info(f"Obtained new access token, expires at {_access_token_cache.expires_at}")
-    return _access_token_cache.token
+    try:
+        data = resp.json()
+    except requests.exceptions.JSONDecodeError as e:
+        raise SystemExit(f"Failed to parse access token response: {e}: {resp.text}")
+    try:
+        access_token = _AccessToken(
+            token=data["token"],
+            expires_at=datetime.fromisoformat(data["expires_at"]),
+        )
+    except KeyError as e:
+        raise SystemExit(
+            f"Unexpected access token response structure, missing key {e}: {resp.text}"
+        )
+    except ValueError as e:
+        raise SystemExit(f"Invalid expires_at format in access token response: {e}")
+    _access_token_cache[installation_id] = access_token
+    logger.info(f"Obtained new access token, expires at {access_token.expires_at}")
+    return access_token.token
 
 
 def setup_logging() -> None:
@@ -556,7 +571,8 @@ def main() -> int:
     github_jwt = os.environ.get("GITHUB_TOKEN") or None
     if not github_jwt:
         logger.warning(
-            "GITHUB_TOKEN not set; proceeding without authentication (suitable for testing only)"
+            "GITHUB_TOKEN (expected to be a GitHub App JWT, not a personal access token) "
+            "is not set; proceeding without authentication (suitable for testing only)"
         )
 
     # Read BigQuery configuration
@@ -568,7 +584,8 @@ def main() -> int:
     if not bigquery_dataset:
         raise SystemExit("Environment variable BIGQUERY_DATASET is required")
 
-    # Setup GitHub session (auth header set per-repo using installation access token)
+    # Setup GitHub session; the Authorization header is updated before each repo using
+    # an installation access token (which may be cached)
     session = requests.Session()
     session.headers.update(
         {
@@ -610,7 +627,9 @@ def main() -> int:
     for repo in github_repos:
         # Get (or refresh) the installation access token before processing each repo
         if github_jwt:
-            access_token = get_installation_access_token(github_jwt, repo, github_api_url)
+            access_token = get_installation_access_token(
+                github_jwt, repo, github_api_url
+            )
             session.headers["Authorization"] = f"Bearer {access_token}"
 
         for chunk_count, chunk in enumerate(
