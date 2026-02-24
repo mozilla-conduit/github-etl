@@ -31,6 +31,7 @@ class _AccessToken:
 
 
 _access_token_cache: dict[int, _AccessToken] = {}
+_repo_installation_cache: dict[str, int] = {}
 
 
 def get_installation_access_token(
@@ -44,7 +45,8 @@ def get_installation_access_token(
     Uses the JWT to look up the installation for the given repo, then exchanges
     it for an installation access token (valid for 1 hour). Tokens are cached
     per installation ID so that repos sharing an installation reuse the same token,
-    while repos on different installations each get their own.
+    while repos on different installations each get their own. The repo->installation
+    ID mapping is also cached since it never changes.
 
     Args:
         jwt: GitHub App JWT (stored in GITHUB_TOKEN env var)
@@ -60,20 +62,24 @@ def get_installation_access_token(
     headers = {
         "Authorization": f"Bearer {jwt}",
         "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
     }
 
-    resp = requests.get(f"{api_base}/repos/{repo}/installation", headers=headers)
-    if resp.status_code != 200:
-        raise SystemExit(
-            f"Failed to get GitHub App installation for {repo}: "
-            f"{resp.status_code}: {resp.text}"
-        )
-    try:
-        installation_id = resp.json()["id"]
-    except (requests.exceptions.JSONDecodeError, KeyError) as e:
-        raise SystemExit(
-            f"Failed to parse installation response for {repo}: {e}: {resp.text}"
-        )
+    installation_id = _repo_installation_cache.get(repo)
+    if installation_id is None:
+        resp = requests.get(f"{api_base}/repos/{repo}/installation", headers=headers)
+        if resp.status_code != 200:
+            raise SystemExit(
+                f"Failed to get GitHub App installation for {repo}: "
+                f"{resp.status_code}: {resp.text}"
+            )
+        try:
+            installation_id = resp.json()["id"]
+        except (requests.exceptions.JSONDecodeError, KeyError) as e:
+            raise SystemExit(
+                f"Failed to parse installation response for {repo}: {e}: {resp.text}"
+            )
+        _repo_installation_cache[repo] = installation_id
 
     now = datetime.now(timezone.utc)
     cached = _access_token_cache.get(installation_id)
