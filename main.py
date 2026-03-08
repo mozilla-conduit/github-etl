@@ -265,7 +265,10 @@ def github_get(
         resp = session.get(url, params=params)
         if resp.status_code == 200:
             return resp
-        if resp.status_code == 403 and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0:
+        if (
+            resp.status_code == 403
+            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
+        ):
             sleep_for_rate_limit(resp)
             continue
         raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text}")
