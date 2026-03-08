@@ -271,7 +271,7 @@ def github_get(
         ):
             sleep_for_rate_limit(resp)
             continue
-        raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text}")
+        raise SystemExit(f"GitHub API error {resp.status_code} for {url}: {resp.text or 'No response text'}")
 
 
 def transform_data(raw_data: list[dict], repo: str) -> dict:
