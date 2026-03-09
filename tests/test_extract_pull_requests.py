@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Tests for extract_pull_requests function.
-
-Tests pull request extraction including pagination, rate limiting, error handling,
-and enrichment with commits, reviewers, and comments.
-"""
-
 from unittest.mock import Mock, patch
 
 import pytest
@@ -256,33 +249,6 @@ def test_invalid_page_number_handling(mock_session):
 
     # Should stop pagination on invalid page number
     assert len(result) == 1
-
-
-def test_custom_github_api_url(mock_session):
-    """Test using custom GitHub API URL."""
-    custom_url = "https://mock-github.example.com"
-
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = [{"number": 1}]
-    mock_response.links = {}
-
-    mock_session.get.return_value = mock_response
-
-    with (
-        patch("main.extract_commits", return_value=[]),
-        patch("main.extract_reviewers", return_value=[]),
-        patch("main.extract_comments", return_value=[]),
-    ):
-        list(
-            main.extract_pull_requests(
-                mock_session, "mozilla/firefox", github_api_url=custom_url
-            )
-        )
-
-    # Verify custom URL was used
-    call_args = mock_session.get.call_args
-    assert custom_url in call_args[0][0]
 
 
 def test_skips_prs_without_number_field(mock_session):

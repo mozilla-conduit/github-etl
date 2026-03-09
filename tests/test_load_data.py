@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Tests for load_data function.
-
-Tests BigQuery data loading including table insertion, snapshot dates,
-and error handling.
-"""
-
 from unittest.mock import patch
 
 import pytest

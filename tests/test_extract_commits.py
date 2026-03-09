@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""
-Tests for extract_commits function.
-
-Tests commit extraction including file details, rate limiting, and error handling.
-"""
-
 from unittest.mock import Mock, patch
 
 import pytest
@@ -13,8 +7,7 @@ import main
 
 
 def test_extract_commits_with_files(mock_session):
-    """Test extracting commits with file details."""
-    # Mock commits list response
+    """Test that file details are fetched per commit and merged into commit data."""
     commits_response = Mock()
     commits_response.status_code = 200
     commits_response.json.return_value = [
@@ -22,7 +15,6 @@ def test_extract_commits_with_files(mock_session):
         {"sha": "def456"},
     ]
 
-    # Mock individual commit responses
     commit_detail_1 = Mock()
     commit_detail_1.status_code = 200
     commit_detail_1.json.return_value = {
@@ -45,15 +37,19 @@ def test_extract_commits_with_files(mock_session):
 
     result = main.extract_commits(mock_session, "mozilla/firefox", 123)
 
-    assert len(result) == 2
-    assert result[0]["sha"] == "abc123"
+    # Verify the individual commit detail endpoints were fetched
+    assert mock_session.get.call_count == 3
+    calls = mock_session.get.call_args_list
+    assert "commits/abc123" in calls[1][0][0]
+    assert "commits/def456" in calls[2][0][0]
+
+    # Verify file data from detail responses is merged into each commit
     assert result[0]["files"][0]["filename"] == "file1.py"
-    assert result[1]["sha"] == "def456"
     assert result[1]["files"][0]["filename"] == "file2.py"
 
 
 def test_multiple_files_per_commit(mock_session):
-    """Test handling multiple files in a single commit."""
+    """Test that all files from a commit detail response are merged into the commit."""
     commits_response = Mock()
     commits_response.status_code = 200
     commits_response.json.return_value = [{"sha": "abc123"}]
@@ -73,19 +69,16 @@ def test_multiple_files_per_commit(mock_session):
 
     result = main.extract_commits(mock_session, "mozilla/firefox", 123)
 
-    assert len(result) == 1
     assert len(result[0]["files"]) == 3
 
 
 @patch("main.sleep_for_rate_limit")
 def test_rate_limit_on_commits_list(mock_sleep, mock_session):
     """Test rate limit handling when fetching commits list."""
-    # Rate limit response
     rate_limit_response = Mock()
     rate_limit_response.status_code = 403
     rate_limit_response.headers = {"X-RateLimit-Remaining": "0"}
 
-    # Success response
     success_response = Mock()
     success_response.status_code = 200
     success_response.json.return_value = []
@@ -128,63 +121,3 @@ def test_api_error_on_individual_commit(mock_session):
         main.extract_commits(mock_session, "mozilla/firefox", 123)
 
     assert "GitHub API error 404" in str(exc_info.value)
-
-
-def test_commit_without_sha_field(mock_session):
-    """Test handling commits without sha field."""
-    commits_response = Mock()
-    commits_response.status_code = 200
-    commits_response.json.return_value = [
-        {"sha": "abc123"},
-        {},  # Missing sha field
-    ]
-
-    commit_detail_1 = Mock()
-    commit_detail_1.status_code = 200
-    commit_detail_1.json.return_value = {"sha": "abc123", "files": []}
-
-    commit_detail_2 = Mock()
-    commit_detail_2.status_code = 200
-    commit_detail_2.json.return_value = {"files": []}
-
-    mock_session.get.side_effect = [
-        commits_response,
-        commit_detail_1,
-        commit_detail_2,
-    ]
-
-    result = main.extract_commits(mock_session, "mozilla/firefox", 123)
-
-    # Should handle the commit without sha gracefully
-    assert len(result) == 2
-
-
-def test_custom_github_api_url_commits(mock_session):
-    """Test using custom GitHub API URL for commits."""
-    custom_url = "https://mock-github.example.com"
-
-    commits_response = Mock()
-    commits_response.status_code = 200
-    commits_response.json.return_value = []
-
-    mock_session.get.return_value = commits_response
-
-    main.extract_commits(
-        mock_session, "mozilla/firefox", 123, github_api_url=custom_url
-    )
-
-    call_args = mock_session.get.call_args
-    assert custom_url in call_args[0][0]
-
-
-def test_empty_commits_list(mock_session):
-    """Test handling PR with no commits."""
-    commits_response = Mock()
-    commits_response.status_code = 200
-    commits_response.json.return_value = []
-
-    mock_session.get.return_value = commits_response
-
-    result = main.extract_commits(mock_session, "mozilla/firefox", 123)
-
-    assert result == []

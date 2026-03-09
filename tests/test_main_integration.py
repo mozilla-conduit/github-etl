@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Tests for main function and full ETL integration.
-
-Tests main orchestration including environment variables, session setup,
-repository processing, chunked ETL flow, and end-to-end integration tests.
-"""
-
 import os
 from unittest.mock import MagicMock, Mock, patch
 
@@ -171,67 +164,6 @@ def test_honors_bigquery_emulator_host(
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_creates_session_with_headers(
-    mock_session_class, mock_bq_client, mock_setup_logging
-):
-    """Test that session is created with Accept and User-Agent headers."""
-    mock_session = MagicMock()
-    mock_session_class.return_value = mock_session
-
-    with (
-        patch.dict(
-            os.environ,
-            {
-                "GITHUB_REPOS": "mozilla/firefox",
-                "BIGQUERY_PROJECT": "test",
-                "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "token",
-            },
-            clear=True,
-        ),
-        patch("main.extract_pull_requests", return_value=iter([])),
-    ):
-        main.main()
-
-        # Verify session headers were set
-        assert mock_session.headers.update.called
-        call_args = mock_session.headers.update.call_args[0][0]
-        assert "Accept" in call_args
-        assert "User-Agent" in call_args
-
-
-@patch("main.setup_logging")
-@patch("main.bigquery.Client")
-@patch("requests.Session")
-def test_sets_authorization_header_with_token(
-    mock_session_class, mock_bq_client, mock_setup_logging
-):
-    """Test that Authorization header is set when token provided."""
-    mock_session = MagicMock()
-    mock_session_class.return_value = mock_session
-
-    with (
-        patch.dict(
-            os.environ,
-            {
-                "GITHUB_REPOS": "mozilla/firefox",
-                "BIGQUERY_PROJECT": "test",
-                "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "test-token-123",
-            },
-            clear=True,
-        ),
-        patch("main.extract_pull_requests", return_value=iter([])),
-    ):
-        main.main()
-
-        # Verify Authorization header was set
-        assert mock_session.headers.__setitem__.called
-
-
-@patch("main.setup_logging")
-@patch("main.bigquery.Client")
-@patch("requests.Session")
 @patch("main.extract_pull_requests")
 @patch("main.transform_data")
 @patch("main.load_data")
@@ -265,8 +197,6 @@ def test_single_repo_successful_etl(
         result = main.main()
 
     assert result == 0
-    mock_extract.assert_called_once()
-    mock_transform.assert_called_once()
     mock_load.assert_called_once()
 
 

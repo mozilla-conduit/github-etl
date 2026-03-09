@@ -22,6 +22,8 @@ from google.cloud import bigquery
 
 BUG_RE = re.compile(r"\b(?:bug|b=)\s*#?(\d+)\b", re.I)
 
+logger = logging.getLogger(__name__)
+
 
 def setup_logging() -> None:
     """Configure logging for the ETL process."""
@@ -53,7 +55,6 @@ def extract_pull_requests(
     Yields:
         List of pull request dictionaries (up to chunk_size items)
     """
-    logger = logging.getLogger(__name__)
     logger.info("Starting data extraction from GitHub repositories")
 
     # Support custom API URL for mocking/testing
@@ -155,7 +156,6 @@ def extract_commits(
     Returns:
         List of commit dictionaries for the pull request
     """
-    logger = logging.getLogger(__name__)
     logger.info(f"Extracting commits for PR #{pr_number}")
 
     # Support custom API URL for mocking/testing
@@ -207,7 +207,6 @@ def extract_reviewers(
     Returns:
         List of reviewer dictionaries for the pull request
     """
-    logger = logging.getLogger(__name__)
     logger.info(f"Extracting reviewers for PR #{pr_number}")
 
     # Support custom API URL for mocking/testing
@@ -249,7 +248,6 @@ def extract_comments(
     Returns:
         List of comment dictionaries for the pull request
     """
-    logger = logging.getLogger(__name__)
     logger.info(f"Extracting comments for PR #{pr_number}")
 
     # Support custom API URL for mocking/testing
@@ -295,7 +293,6 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
     Returns:
         List of transformed pull requests, commits, reviewers, and comments ready for BigQuery
     """
-    logger = logging.getLogger(__name__)
     logger.info(f"Starting data transformation for {len(raw_data)} PRs")
 
     transformed_data: dict = {
@@ -426,8 +423,6 @@ def load_data(
         transformed_data: Dictionary containing tables ('pull_requests',
             'commits', 'reviewers', 'comments') mapped to lists of row dictionaries
     """
-    logger = logging.getLogger(__name__)
-
     if not transformed_data:
         logger.warning("No data to load, skipping")
         return
@@ -475,8 +470,6 @@ def main() -> int:
     4. Repeat until no more data
     """
     setup_logging()
-    logger = logging.getLogger(__name__)
-
     logger.info("Starting GitHub ETL process with chunked processing")
 
     github_token = os.environ.get("GITHUB_TOKEN")
@@ -529,7 +522,7 @@ def main() -> int:
     github_repos = []
     github_repos_str = os.getenv("GITHUB_REPOS")
     if github_repos_str:
-        github_repos = github_repos_str.split(",")
+        github_repos = [r.strip() for r in github_repos_str.split(",") if r.strip()]
     else:
         raise SystemExit(
             "Environment variable GITHUB_REPOS is required (format: 'owner/repo,owner/repo')"

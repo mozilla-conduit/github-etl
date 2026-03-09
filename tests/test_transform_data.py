@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-Tests for transform_data function.
-
-Tests data transformation including bug ID extraction, label processing,
-commit/reviewer/comment flattening, and field mapping.
-"""
+import pytest
 
 import main
 
@@ -38,30 +33,31 @@ def test_transform_data_basic():
     assert pr["target_repository"] == "mozilla/firefox"
 
 
-def test_bug_id_extraction_basic():
-    """Test bug ID extraction from PR title."""
-    test_cases = [
+@pytest.mark.parametrize(
+    "title,expected_bug_id",
+    [
         ("Bug 1234567 - Fix issue", 1234567),
         ("bug 1234567: Update code", 1234567),
         ("Fix for bug 7654321", 7654321),
         ("b=9876543 - Change behavior", 9876543),
+    ],
+)
+def test_bug_id_extraction_basic(title: str, expected_bug_id: int):
+    """Test bug ID extraction from PR title."""
+    raw_data = [
+        {
+            "number": 1,
+            "title": title,
+            "state": "open",
+            "labels": [],
+            "commit_data": [],
+            "reviewer_data": [],
+            "comment_data": [],
+        }
     ]
 
-    for title, expected_bug_id in test_cases:
-        raw_data = [
-            {
-                "number": 1,
-                "title": title,
-                "state": "open",
-                "labels": [],
-                "commit_data": [],
-                "reviewer_data": [],
-                "comment_data": [],
-            }
-        ]
-
-        result = main.transform_data(raw_data, "mozilla/firefox")
-        assert result["pull_requests"][0]["bug_id"] == expected_bug_id
+    result = main.transform_data(raw_data, "mozilla/firefox")
+    assert result["pull_requests"][0]["bug_id"] == expected_bug_id
 
 
 def test_bug_id_extraction_with_hash():

@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""
-Tests for sleep_for_rate_limit function.
-
-Tests rate limit handling including wait time calculation and edge cases.
-"""
-
 from unittest.mock import Mock, patch
 
 import main

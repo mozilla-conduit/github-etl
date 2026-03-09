@@ -48,13 +48,13 @@ docker run --rm \
 
 ### Environment Variables
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `GITHUB_REPOS` | Yes | - | Comma separated repositories in format "owner/repo" (e.g., "mozilla/firefox") |
-| `GITHUB_TOKEN` | No | - | GitHub Personal Access Token (recommended to avoid rate limits) |
-| `BIGQUERY_PROJECT` | Yes | - | Google Cloud Project ID |
-| `BIGQUERY_DATASET` | Yes | - | BigQuery dataset ID |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Yes* | - | Path to GCP service account JSON file (*or use Workload Identity) |
+| Variable                         | Required | Default | Description                                                                   |
+| -------------------------------- | -------- | ------- | ----------------------------------------------------------------------------- |
+| `GITHUB_REPOS`                   | Yes      | -       | Comma separated repositories in format "owner/repo" (e.g., "mozilla/firefox") |
+| `GITHUB_TOKEN`                   | No       | -       | GitHub Personal Access Token (recommended to avoid rate limits)               |
+| `BIGQUERY_PROJECT`               | Yes      | -       | Google Cloud Project ID                                                       |
+| `BIGQUERY_DATASET`               | Yes      | -       | BigQuery dataset ID                                                           |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Yes\*    | -       | Path to GCP service account JSON file (\*or use Workload Identity)            |
 
 ## Architecture
 
@@ -159,94 +159,25 @@ This setup includes:
 
 ### Running Tests
 
-The project includes a comprehensive test suite using pytest. Tests are organized in the `test/` directory and include both unit and integration tests.
+The project includes a test suite using pytest. Tests are in the `tests/` directory.
 
-#### Setting Up the Development Environment
+Install development dependencies:
 
-1. **Install Python 3.14** (or your compatible Python version)
+```bash
+pip install -e ".[dev]"
+```
 
-2. **Install development dependencies**:
-
-   ```bash
-   # Install the package with dev dependencies
-   pip install -e ".[dev]"
-   ```
-
-   This installs:
-   - `pytest` - Testing framework
-   - `pytest-mock` - Mocking utilities for tests
-   - `ruff` - Linter
-   - `black` - Code formatter
-
-3. **Verify installation**:
-
-   ```bash
-   pytest --version
-   ```
-
-#### Running the Tests
-
-Run all tests:
+Run tests:
 
 ```bash
 pytest
 ```
 
-Run tests with verbose output:
-
-```bash
-pytest -v
-```
-
-Run specific test files:
-
-```bash
-pytest tests/test_extract_pull_requests.py
-pytest tests/test_transform_data.py
-```
-
-Run tests by marker:
-
-```bash
-# Run only unit tests
-pytest -m unit
-
-# Run only integration tests
-pytest -m integration
-
-# Skip slow tests
-pytest -m "not slow"
-```
-
-Run tests with coverage reporting:
+Run with coverage:
 
 ```bash
 pytest --cov=. --cov-report=html
 ```
-
-#### Test Organization
-
-The test suite is organized into the following files:
-
-- `tests/conftest.py` - Shared pytest fixtures and test configuration
-- `tests/test_extract_pull_requests.py` - Tests for PR extraction logic
-- `tests/test_extract_commits.py` - Tests for commit extraction
-- `tests/test_extract_comments.py` - Tests for comment extraction
-- `tests/test_extract_reviewers.py` - Tests for reviewer extraction
-- `tests/test_transform_data.py` - Tests for data transformation
-- `tests/test_load_data.py` - Tests for BigQuery loading
-- `tests/test_rate_limit.py` - Tests for rate limit handling
-- `tests/test_main_integration.py` - End-to-end integration tests
-- `tests/test_logging.py` - Tests for logging setup
-- `tests/test_formatting.py` - Code formatting tests
-
-#### Test Markers
-
-Tests are marked with the following pytest markers:
-
-- `@pytest.mark.unit` - Unit tests for individual functions
-- `@pytest.mark.integration` - Integration tests across multiple components
-- `@pytest.mark.slow` - Tests that take longer to run
 
 ### Adding Dependencies
 
