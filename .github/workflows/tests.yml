@@ -31,4 +31,5 @@ jobs:
         run: |
           docker compose up --build --abort-on-container-exit --exit-code-from github-etl
       - name: Cleanup
-        run: docker compose down -v
+        if: always()
+        run: docker compose down -v --remove-orphans
