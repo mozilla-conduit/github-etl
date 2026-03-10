@@ -48,13 +48,13 @@ docker run --rm \
 
 ### Environment Variables
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `GITHUB_REPOS` | Yes | - | Comma separated repositories in format "owner/repo" (e.g., "mozilla/firefox") |
-| `GITHUB_TOKEN` | No | - | GitHub Personal Access Token (recommended to avoid rate limits) |
-| `BIGQUERY_PROJECT` | Yes | - | Google Cloud Project ID |
-| `BIGQUERY_DATASET` | Yes | - | BigQuery dataset ID |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Yes* | - | Path to GCP service account JSON file (*or use Workload Identity) |
+| Variable                         | Required | Default | Description                                                                   |
+| -------------------------------- | -------- | ------- | ----------------------------------------------------------------------------- |
+| `GITHUB_REPOS`                   | Yes      | -       | Comma separated repositories in format "owner/repo" (e.g., "mozilla/firefox") |
+| `GITHUB_TOKEN`                   | No       | -       | GitHub Personal Access Token (recommended to avoid rate limits)               |
+| `BIGQUERY_PROJECT`               | Yes      | -       | Google Cloud Project ID                                                       |
+| `BIGQUERY_DATASET`               | Yes      | -       | BigQuery dataset ID                                                           |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Yes\*    | -       | Path to GCP service account JSON file (\*or use Workload Identity)            |
 
 ## Architecture
 
@@ -66,7 +66,7 @@ docker run --rm \
 
 ### Container Specifications
 
-- **Base Image**: `python:3.11-slim` (latest stable Python)
+- **Base Image**: `python:3.14.2-slim` (latest stable Python)
 - **User**: `app` (uid: 1000, gid: 1000)
 - **Working Directory**: `/app`
 - **Ownership**: All files in `/app` are owned by the `app` user
@@ -156,6 +156,28 @@ This setup includes:
 - **Mock GitHub API**: Generates 250 sample pull requests
 - **BigQuery Emulator**: Local BigQuery instance for testing
 - **ETL Service**: Configured to use both mock services
+
+### Running Tests
+
+The project includes a test suite using pytest. Tests are in the `tests/` directory.
+
+Install development dependencies:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Run tests:
+
+```bash
+pytest
+```
+
+Run with coverage:
+
+```bash
+pytest --cov=. --cov-report=html
+```
 
 ### Adding Dependencies
 
