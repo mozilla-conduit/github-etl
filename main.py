@@ -70,17 +70,7 @@ def extract_pull_requests(
     pages = 0
 
     while True:
-        resp = session.get(base_url, params=params)
-        if (
-            resp.status_code == 403
-            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-        ):
-            sleep_for_rate_limit(resp)
-            # retry same URL/params after sleeping
-            continue
-        if resp.status_code != 200:
-            error_text = resp.text if resp.text else "No response text"
-            raise SystemExit(f"GitHub API error {resp.status_code}: {error_text}")
+        resp = github_get(session, base_url, params=params)
 
         batch = resp.json()
         pages += 1
@@ -164,26 +154,13 @@ def extract_commits(
 
     logger.info(f"Commits URL: {commits_url}")
 
-    resp = session.get(commits_url)
-    if (
-        resp.status_code == 403
-        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-    ):
-        sleep_for_rate_limit(resp)
-        resp = session.get(commits_url)
-    if resp.status_code != 200:
-        raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text}")
+    resp = github_get(session, commits_url)
 
     commits = resp.json()
     for commit in commits:
         commit_sha = commit.get("sha")
         commit_url = f"{api_base}/repos/{repo}/commits/{commit_sha}"
-        commit_resp = session.get(commit_url)
-        if commit_resp.status_code != 200:
-            raise SystemExit(
-                f"GitHub API error {commit_resp.status_code}: {commit_resp.text}"
-            )
-        commit_data = commit_resp.json()
+        commit_data = github_get(session, commit_url).json()
         commit["files"] = commit_data.get("files", [])
 
     logger.info(f"Extracted {len(commits)} commits for PR #{pr_number}")
@@ -216,17 +193,7 @@ def extract_reviewers(
 
     logger.info(f"Reviewers URL: {reviewers_url}")
 
-    resp = session.get(reviewers_url)
-    if (
-        resp.status_code == 403
-        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-    ):
-        sleep_for_rate_limit(resp)
-        resp = session.get(reviewers_url)
-    if resp.status_code != 200:
-        raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text}")
-
-    reviewers = resp.json()
+    reviewers = github_get(session, reviewers_url).json()
 
     logger.info(f"Extracted {len(reviewers)} reviewers for PR #{pr_number}")
     return reviewers
@@ -258,17 +225,7 @@ def extract_comments(
 
     logger.info(f"Comments URL: {comments_url}")
 
-    resp = session.get(comments_url)
-    if (
-        resp.status_code == 403
-        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-    ):
-        sleep_for_rate_limit(resp)
-        resp = session.get(comments_url)
-    if resp.status_code != 200:
-        raise SystemExit(f"GitHub API error {resp.status_code}: {resp.text}")
-
-    comments = resp.json()
+    comments = github_get(session, comments_url).json()
     logger.info(f"Extracted {len(comments)} comments for PR #{pr_number}")
     return comments
 
@@ -278,11 +235,45 @@ def sleep_for_rate_limit(resp: requests.Response) -> None:
     remaining = int(resp.headers.get("X-RateLimit-Remaining", 1))
     reset = int(resp.headers.get("X-RateLimit-Reset", 0))
     if remaining == 0:
-        sleep_time = max(0, reset - int(time.time()))
+        sleep_time = max(0, reset - int(time.time())) + 5
         print(
             f"Rate limit exceeded. Sleeping for {sleep_time} seconds.", file=sys.stderr
         )
         time.sleep(sleep_time)
+
+
+def github_get(
+    session: requests.Session,
+    url: str,
+    params: Optional[dict] = None,
+) -> requests.Response:
+    """
+    Make a GitHub API GET request, retrying in a loop on rate limit.
+
+    Args:
+        session: Authenticated requests session
+        url: URL to fetch
+        params: Optional query parameters
+
+    Returns:
+        Successful response (status 200)
+
+    Raises:
+        SystemExit: On non-200, non-rate-limit errors
+    """
+    while True:
+        resp = session.get(url, params=params)
+        if resp.status_code == 200:
+            return resp
+        if (
+            resp.status_code == 403
+            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
+        ):
+            sleep_for_rate_limit(resp)
+            continue
+        raise SystemExit(
+            f"GitHub API error {resp.status_code} for {url}: {resp.text or 'No response text'}"
+        )
 
 
 def transform_data(raw_data: list[dict], repo: str) -> dict:
