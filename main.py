@@ -11,7 +11,8 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Iterator, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -21,6 +22,120 @@ from google.auth.credentials import AnonymousCredentials
 from google.cloud import bigquery
 
 BUG_RE = re.compile(r"\b(?:bug|b=)\s*#?(\d+)\b", re.I)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AccessToken:
+    token: str
+    expires_at: datetime
+
+
+access_token_cache: dict[int, AccessToken] = {}
+repo_installation_cache: dict[str, int] = {}
+
+
+def get_installation_access_token(
+    jwt: str,
+    repo: str,
+    github_api_url: str,
+) -> str:
+    """
+    Get a GitHub App installation access token, returning a cached one if still valid.
+
+    Uses the JWT to look up the installation for the given repo, then exchanges
+    it for an installation access token (valid for 1 hour). Tokens are cached
+    per installation ID so that repos sharing an installation reuse the same token,
+    while repos on different installations each get their own. The repo->installation
+    ID mapping is also cached since it never changes.
+
+    Args:
+        jwt: GitHub App JWT (stored in GITHUB_TOKEN env var)
+        repo: Repository in "owner/repo" format, used to look up the installation
+        github_api_url: GitHub API base URL
+
+    Returns:
+        Installation access token string
+    """
+
+    session = requests.Session()
+    session.headers.update(
+        {
+            "Authorization": f"Bearer {jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+    )
+
+    installation_id = repo_installation_cache.get(repo)
+    if installation_id is None:
+        resp = session.get(f"{github_api_url}/repos/{repo}/installation")
+        if (
+            resp.status_code == 403
+            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
+        ):
+            sleep_for_rate_limit(resp)
+            resp = session.get(f"{github_api_url}/repos/{repo}/installation")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Failed to get GitHub App installation for {repo}: "
+                f"{resp.status_code}: {resp.text}"
+            )
+        try:
+            installation_id = resp.json()["id"]
+        except (requests.exceptions.JSONDecodeError, KeyError) as e:
+            raise RuntimeError(
+                f"Failed to parse installation response for {repo}: {e}: {resp.text}"
+            )
+        repo_installation_cache[repo] = installation_id
+
+    now = datetime.now(timezone.utc)
+    cached = access_token_cache.get(installation_id)
+    if cached is not None and cached.expires_at > now + timedelta(seconds=60):
+        logger.info(
+            f"Reusing cached access token for installation {installation_id}, "
+            f"expires at {cached.expires_at}"
+        )
+        return cached.token
+
+    logger.info(
+        f"Fetching new GitHub App installation access token for installation {installation_id}"
+    )
+    resp = session.post(
+        f"{github_api_url}/app/installations/{installation_id}/access_tokens",
+    )
+    if (
+        resp.status_code == 403
+        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
+    ):
+        sleep_for_rate_limit(resp)
+        resp = session.post(
+            f"{github_api_url}/app/installations/{installation_id}/access_tokens",
+        )
+    if resp.status_code != 201:
+        raise RuntimeError(
+            f"Failed to get installation access token: {resp.status_code}: {resp.text}"
+        )
+
+    try:
+        data = resp.json()
+    except requests.exceptions.JSONDecodeError as e:
+        raise RuntimeError(f"Failed to parse access token response: {e}: {resp.text}")
+    try:
+        access_token = AccessToken(
+            token=data["token"],
+            expires_at=datetime.fromisoformat(data["expires_at"]),
+        )
+    except KeyError as e:
+        raise RuntimeError(
+            f"Unexpected access token response structure, missing key {e}: {resp.text}"
+        )
+    except ValueError as e:
+        raise RuntimeError(f"Invalid expires_at format in access token response: {e}")
+    access_token_cache[installation_id] = access_token
+    logger.info(f"Obtained new access token, expires at {access_token.expires_at}")
+    return access_token.token
 
 
 def setup_logging() -> None:
@@ -37,7 +152,7 @@ def extract_pull_requests(
     session: requests.Session,
     repo: str,
     chunk_size: int = 100,
-    github_api_url: Optional[str] = None,
+    github_api_url: str = "https://api.github.com",
 ) -> Iterator[list[dict]]:
     """
     Extract data from GitHub repositories in chunks.
@@ -48,17 +163,14 @@ def extract_pull_requests(
         session: Authenticated requests session
         repo: GitHub repository name
         chunk_size: Number of PRs to yield per chunk (default: 100)
-        github_api_url: Optional custom GitHub API URL (for testing/mocking)
+        github_api_url: GitHub API base URL
 
     Yields:
         List of pull request dictionaries (up to chunk_size items)
     """
-    logger = logging.getLogger(__name__)
     logger.info("Starting data extraction from GitHub repositories")
 
-    # Support custom API URL for mocking/testing
-    api_base = github_api_url or "https://api.github.com"
-    base_url = f"{api_base}/repos/{repo}/pulls"
+    base_url = f"{github_api_url}/repos/{repo}/pulls"
     params: dict = {
         "state": "all",
         "per_page": chunk_size,
@@ -132,7 +244,7 @@ def extract_commits(
     session: requests.Session,
     repo: str,
     pr_number: int,
-    github_api_url: Optional[str] = None,
+    github_api_url: str,
 ) -> list[dict]:
     """
     Extract commits and files for a specific pull request.
@@ -141,16 +253,13 @@ def extract_commits(
         session: Authenticated requests session
         repo: GitHub repository name
         pr_number: Pull request number
-        github_api_url: Optional custom GitHub API URL (for testing/mocking)
+        github_api_url: GitHub API base URL
     Returns:
         List of commit dictionaries for the pull request
     """
-    logger = logging.getLogger(__name__)
     logger.info(f"Extracting commits for PR #{pr_number}")
 
-    # Support custom API URL for mocking/testing
-    api_base = github_api_url or "https://api.github.com"
-    commits_url = f"{api_base}/repos/{repo}/pulls/{pr_number}/commits"
+    commits_url = f"{github_api_url}/repos/{repo}/pulls/{pr_number}/commits"
 
     logger.info(f"Commits URL: {commits_url}")
 
@@ -159,7 +268,7 @@ def extract_commits(
     commits = resp.json()
     for commit in commits:
         commit_sha = commit.get("sha")
-        commit_url = f"{api_base}/repos/{repo}/commits/{commit_sha}"
+        commit_url = f"{github_api_url}/repos/{repo}/commits/{commit_sha}"
         commit_data = github_get(session, commit_url).json()
         commit["files"] = commit_data.get("files", [])
 
@@ -171,7 +280,7 @@ def extract_reviewers(
     session: requests.Session,
     repo: str,
     pr_number: int,
-    github_api_url: Optional[str] = None,
+    github_api_url: str,
 ) -> list[dict]:
     """
     Extract reviewers for a specific pull request.
@@ -180,16 +289,13 @@ def extract_reviewers(
         session: Authenticated requests session
         repo: GitHub repository name
         pr_number: Pull request number
-        github_api_url: Optional custom GitHub API URL (for testing/mocking)
+        github_api_url: GitHub API base URL
     Returns:
         List of reviewer dictionaries for the pull request
     """
-    logger = logging.getLogger(__name__)
     logger.info(f"Extracting reviewers for PR #{pr_number}")
 
-    # Support custom API URL for mocking/testing
-    api_base = github_api_url or "https://api.github.com"
-    reviewers_url = f"{api_base}/repos/{repo}/pulls/{pr_number}/reviews"
+    reviewers_url = f"{github_api_url}/repos/{repo}/pulls/{pr_number}/reviews"
 
     logger.info(f"Reviewers URL: {reviewers_url}")
 
@@ -203,7 +309,7 @@ def extract_comments(
     session: requests.Session,
     repo: str,
     pr_number: int,
-    github_api_url: Optional[str] = None,
+    github_api_url: str,
 ) -> list[dict]:
     """
     Extract comments for a specific pull request.
@@ -212,16 +318,13 @@ def extract_comments(
         session: Authenticated requests session
         repo: GitHub repository name
         pr_number: Pull request number
-        github_api_url: Optional custom GitHub API URL (for testing/mocking)
+        github_api_url: GitHub API base URL
     Returns:
         List of comment dictionaries for the pull request
     """
-    logger = logging.getLogger(__name__)
     logger.info(f"Extracting comments for PR #{pr_number}")
 
-    # Support custom API URL for mocking/testing
-    api_base = github_api_url or "https://api.github.com"
-    comments_url = f"{api_base}/repos/{repo}/issues/{pr_number}/comments"
+    comments_url = f"{github_api_url}/repos/{repo}/issues/{pr_number}/comments"
 
     logger.info(f"Comments URL: {comments_url}")
 
@@ -286,7 +389,6 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
     Returns:
         List of transformed pull requests, commits, reviewers, and comments ready for BigQuery
     """
-    logger = logging.getLogger(__name__)
     logger.info(f"Starting data transformation for {len(raw_data)} PRs")
 
     transformed_data: dict = {
@@ -417,7 +519,6 @@ def load_data(
         transformed_data: Dictionary containing tables ('pull_requests',
             'commits', 'reviewers', 'comments') mapped to lists of row dictionaries
     """
-    logger = logging.getLogger(__name__)
 
     if not transformed_data:
         logger.warning("No data to load, skipping")
@@ -466,15 +567,21 @@ def main() -> int:
     4. Repeat until no more data
     """
     setup_logging()
-    logger = logging.getLogger(__name__)
+    try:
+        return _main()
+    except RuntimeError as e:
+        logger.error(str(e))
+        return 1
 
+
+def _main() -> int:
     logger.info("Starting GitHub ETL process with chunked processing")
 
-    github_token = os.environ.get("GITHUB_TOKEN")
-    if not github_token:
+    github_jwt = os.environ.get("GITHUB_TOKEN") or None
+    if not github_jwt:
         logger.warning(
-            "Warning: No token provided. You will hit very low rate "
-            + "limits and private repos won't work."
+            "GITHUB_TOKEN (expected to be a GitHub App JWT, not a personal access token) "
+            "is not set; proceeding without authentication (suitable for testing only)"
         )
 
     # Read BigQuery configuration
@@ -482,11 +589,12 @@ def main() -> int:
     bigquery_dataset = os.environ.get("BIGQUERY_DATASET")
 
     if not bigquery_project:
-        raise SystemExit("Environment variable BIGQUERY_PROJECT is required")
+        raise RuntimeError("Environment variable BIGQUERY_PROJECT is required")
     if not bigquery_dataset:
-        raise SystemExit("Environment variable BIGQUERY_DATASET is required")
+        raise RuntimeError("Environment variable BIGQUERY_DATASET is required")
 
-    # Setup GitHub session
+    # Setup GitHub session; the Authorization header is updated before each repo using
+    # an installation access token (which may be cached)
     session = requests.Session()
     session.headers.update(
         {
@@ -495,12 +603,8 @@ def main() -> int:
         }
     )
 
-    if github_token:
-        session.headers["Authorization"] = f"Bearer {github_token}"
-
-    # Support custom GitHub API URL for testing/mocking
-    github_api_url = os.environ.get("GITHUB_API_URL")
-    if github_api_url:
+    github_api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+    if os.environ.get("GITHUB_API_URL"):
         logger.info(f"Using custom GitHub API URL: {github_api_url}")
 
     # Setup BigQuery client
@@ -522,13 +626,20 @@ def main() -> int:
     if github_repos_str:
         github_repos = github_repos_str.split(",")
     else:
-        raise SystemExit(
+        raise RuntimeError(
             "Environment variable GITHUB_REPOS is required (format: 'owner/repo,owner/repo')"
         )
 
     total_processed = 0
 
     for repo in github_repos:
+        # Get (or refresh) the installation access token before processing each repo
+        if github_jwt:
+            access_token = get_installation_access_token(
+                github_jwt, repo, github_api_url
+            )
+            session.headers["Authorization"] = f"Bearer {access_token}"
+
         for chunk_count, chunk in enumerate(
             extract_pull_requests(
                 session, repo, chunk_size=100, github_api_url=github_api_url
