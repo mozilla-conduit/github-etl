@@ -13,7 +13,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterator
+from typing import Iterator, Optional
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -268,7 +268,7 @@ def extract_commits(
     commits = resp.json()
     for commit in commits:
         commit_sha = commit.get("sha")
-        commit_url = f"{api_base}/repos/{repo}/commits/{commit_sha}"
+        commit_url = f"{github_api_url}/repos/{repo}/commits/{commit_sha}"
         commit_data = github_get(session, commit_url).json()
         commit["files"] = commit_data.get("files", [])
 
