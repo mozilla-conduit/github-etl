@@ -301,8 +301,15 @@ def extract_reviewers(
 
     reviewers = github_get(session, reviewers_url).json()
 
-    logger.info(f"Extracted {len(reviewers)} reviewers for PR #{pr_number}")
-    return reviewers
+    filtered = [r for r in reviewers if r.get("user") is not None]
+    skipped = len(reviewers) - len(filtered)
+    if skipped:
+        logger.info(
+            f"Skipped {skipped} reviewer(s) with null user for PR #{pr_number}"
+        )
+
+    logger.info(f"Extracted {len(filtered)} reviewers for PR #{pr_number}")
+    return filtered
 
 
 def extract_comments(
@@ -329,8 +336,16 @@ def extract_comments(
     logger.info(f"Comments URL: {comments_url}")
 
     comments = github_get(session, comments_url).json()
-    logger.info(f"Extracted {len(comments)} comments for PR #{pr_number}")
-    return comments
+
+    filtered = [c for c in comments if c.get("user") is not None and c.get("body")]
+    skipped = len(comments) - len(filtered)
+    if skipped:
+        logger.info(
+            f"Skipped {skipped} comment(s) with null user or empty body for PR #{pr_number}"
+        )
+
+    logger.info(f"Extracted {len(filtered)} comments for PR #{pr_number}")
+    return filtered
 
 
 def sleep_for_rate_limit(resp: requests.Response) -> None:
@@ -459,7 +474,7 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
                 "target_repository": repo,
                 "date_reviewed": review.get("submitted_at"),
                 "reviewer_email": None,  # TODO Placeholder for reviewer email extraction logic
-                "reviewer_username": review.get("user", {}).get("login", "None"),
+                "reviewer_username": (review.get("user") or {}).get("login"),
                 "status": review.get("state"),
             }
             transformed_data["reviewers"].append(transformed_reviewer)
