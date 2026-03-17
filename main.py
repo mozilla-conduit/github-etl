@@ -304,9 +304,7 @@ def extract_reviewers(
     filtered = [r for r in reviewers if r.get("user") is not None]
     skipped = len(reviewers) - len(filtered)
     if skipped:
-        logger.info(
-            f"Skipped {skipped} reviewer(s) with null user for PR #{pr_number}"
-        )
+        logger.info(f"Skipped {skipped} reviewer(s) with null user for PR #{pr_number}")
 
     logger.info(f"Extracted {len(filtered)} reviewers for PR #{pr_number}")
     return filtered
