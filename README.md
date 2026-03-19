@@ -22,7 +22,7 @@ runs in a Docker container for easy deployment and isolation.
 
 ### Prerequisites
 
-1. **GitHub App**: Create a GitHub App with read access to the target repositories, then note the numeric **App ID** and download a **private key** (PEM format)
+1. **GitHub App** *(recommended, required for authenticated runs)*: Create a GitHub App with read access to the target repositories, then note the numeric **App ID** and download a **private key** (PEM format). Without these the ETL runs unauthenticated (low rate-limit quota — suitable for testing only).
 2. **Google Cloud Project**: Set up a GCP project with BigQuery enabled
 3. **BigQuery Dataset**: Create a dataset in your GCP project
 4. **Authentication**: Configure GCP credentials (see Authentication section below)
@@ -35,17 +35,32 @@ docker build -t github-etl .
 
 ### Running the Container
 
+Create an env file (do **not** commit it):
+
+```bash
+# github-etl.env
+GITHUB_REPOS=mozilla/firefox
+GITHUB_APP_ID=your_github_app_id
+GITHUB_PRIVATE_KEY=<paste PEM contents here, with literal \n newlines>
+BIGQUERY_PROJECT=your-gcp-project
+BIGQUERY_DATASET=your_dataset
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
+```
+
+Then run the container using `--env-file` to avoid exposing secrets in shell history
+or via `/proc/<pid>/environ`:
+
 ```bash
 docker run --rm \
-  -e GITHUB_REPOS="mozilla/firefox" \
-  -e GITHUB_APP_ID="your_github_app_id" \
-  -e GITHUB_PRIVATE_KEY="$(cat your_private_key.pem)" \
-  -e BIGQUERY_PROJECT="your-gcp-project" \
-  -e BIGQUERY_DATASET="your_dataset" \
-  -e GOOGLE_APPLICATION_CREDENTIALS="/path/to/credentials.json" \
+  --env-file github-etl.env \
   -v /local/path/to/credentials.json:/path/to/credentials.json \
   github-etl
 ```
+
+> **Note**: Never pass the private key inline with `-e GITHUB_PRIVATE_KEY="$(cat ...)"` —
+> that leaks the key into your shell history and makes it visible to other processes via
+> `ps`/`/proc`. Use `--env-file`, Docker secrets, or mount the PEM file and point
+> `GITHUB_PRIVATE_KEY_FILE` at it instead.
 
 ### Environment Variables
 
@@ -131,7 +146,8 @@ Set up environment variables and run the script:
 ```bash
 export GITHUB_REPOS="mozilla/firefox"
 export GITHUB_APP_ID="your_github_app_id"
-export GITHUB_PRIVATE_KEY="$(cat your_private_key.pem)"
+# Load the PEM from a file to avoid the key appearing in shell history
+export GITHUB_PRIVATE_KEY="$(< your_private_key.pem)"
 export BIGQUERY_PROJECT="your-gcp-project"
 export BIGQUERY_DATASET="your_dataset"
 
