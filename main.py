@@ -17,6 +17,7 @@ from typing import Iterator, Optional
 from urllib.parse import parse_qs, urlparse
 
 import requests
+from google.api_core import exceptions as api_exceptions
 from google.api_core.client_options import ClientOptions
 from google.auth.credentials import AnonymousCredentials
 from google.cloud import bigquery
@@ -518,6 +519,47 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
     return transformed_data
 
 
+def snapshot_exists(
+    client: bigquery.Client,
+    dataset_id: str,
+    repo: str,
+    snapshot_date: str,
+) -> bool:
+    """
+    Check if data already exists in BigQuery for the given repo and snapshot date.
+
+    Queries the pull_requests table as a sentinel — if rows exist there for this
+    (repo, snapshot_date) pair, we treat the repo as already processed for today.
+
+    Args:
+        client: BigQuery client instance
+        dataset_id: BigQuery dataset ID
+        repo: Repository in "owner/repo" format
+        snapshot_date: Snapshot date string in YYYY-MM-DD format
+
+    Returns:
+        True if data already exists, False otherwise
+    """
+    query = f"""
+        SELECT 1
+        FROM `{client.project}.{dataset_id}.pull_requests`
+        WHERE snapshot_date = @snapshot_date
+          AND target_repository = @repo
+        LIMIT 1
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("snapshot_date", "DATE", snapshot_date),
+            bigquery.ScalarQueryParameter("repo", "STRING", repo),
+        ]
+    )
+    try:
+        results = list(client.query(query, job_config=job_config).result())
+        return len(results) > 0
+    except api_exceptions.NotFound:
+        return False
+
+
 def load_data(
     client: bigquery.Client,
     dataset_id: str,
@@ -644,8 +686,16 @@ def _main() -> int:
         )
 
     total_processed = 0
+    snapshot_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     for repo in github_repos:
+        # Skip repos that have already been processed for today's snapshot date
+        if snapshot_exists(bigquery_client, bigquery_dataset, repo, snapshot_date):
+            logger.info(
+                f"Skipping {repo}: data already exists for snapshot_date={snapshot_date}"
+            )
+            continue
+
         # Get (or refresh) the installation access token before processing each repo
         if github_jwt:
             access_token = get_installation_access_token(
