@@ -22,7 +22,7 @@ runs in a Docker container for easy deployment and isolation.
 
 ### Prerequisites
 
-1. **GitHub Personal Access Token**: Create a [token](https://github.com/settings/tokens)
+1. **GitHub App**: Create a GitHub App with read access to the target repositories, then note the numeric **App ID** and download a **private key** (PEM format)
 2. **Google Cloud Project**: Set up a GCP project with BigQuery enabled
 3. **BigQuery Dataset**: Create a dataset in your GCP project
 4. **Authentication**: Configure GCP credentials (see Authentication section below)
@@ -38,7 +38,8 @@ docker build -t github-etl .
 ```bash
 docker run --rm \
   -e GITHUB_REPOS="mozilla/firefox" \
-  -e GITHUB_TOKEN="your_github_token" \
+  -e GITHUB_APP_ID="your_github_app_id" \
+  -e GITHUB_PRIVATE_KEY="$(cat your_private_key.pem)" \
   -e BIGQUERY_PROJECT="your-gcp-project" \
   -e BIGQUERY_DATASET="your_dataset" \
   -e GOOGLE_APPLICATION_CREDENTIALS="/path/to/credentials.json" \
@@ -51,7 +52,8 @@ docker run --rm \
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `GITHUB_REPOS` | Yes | - | Comma separated repositories in format "owner/repo" (e.g., "mozilla/firefox") |
-| `GITHUB_TOKEN` | No | - | GitHub Personal Access Token (recommended to avoid rate limits) |
+| `GITHUB_APP_ID` | No* | - | GitHub App numeric ID (found on the App's settings page). Required for authenticated access. |
+| `GITHUB_PRIVATE_KEY` | No* | - | RSA private key in PEM format for the GitHub App. Required for authenticated access. |
 | `BIGQUERY_PROJECT` | Yes | - | Google Cloud Project ID |
 | `BIGQUERY_DATASET` | Yes | - | BigQuery dataset ID |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Yes* | - | Path to GCP service account JSON file (*or use Workload Identity) |
@@ -128,7 +130,8 @@ Set up environment variables and run the script:
 
 ```bash
 export GITHUB_REPOS="mozilla/firefox"
-export GITHUB_TOKEN="your_github_token"
+export GITHUB_APP_ID="your_github_app_id"
+export GITHUB_PRIVATE_KEY="$(cat your_private_key.pem)"
 export BIGQUERY_PROJECT="your-gcp-project"
 export BIGQUERY_DATASET="your_dataset"
 

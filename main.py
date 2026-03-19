@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterator, Optional
 from urllib.parse import parse_qs, urlparse
 
+import jwt
 import requests
 from google.api_core.client_options import ClientOptions
 from google.auth.credentials import AnonymousCredentials
@@ -34,6 +35,30 @@ class AccessToken:
 
 access_token_cache: dict[int, AccessToken] = {}
 repo_installation_cache: dict[str, int] = {}
+
+
+def generate_github_jwt(app_id: str, private_key_pem: str) -> str:
+    """
+    Generate a short-lived GitHub App JWT signed with the app's private key.
+
+    GitHub App JWTs are valid for a maximum of 10 minutes. We use a 9-minute
+    expiry and backdate iat by 60 seconds to absorb clock skew between the
+    local machine and GitHub's servers.
+
+    Args:
+        app_id: GitHub App ID (numeric, found on the App's settings page)
+        private_key_pem: RSA private key in PEM format
+
+    Returns:
+        Signed JWT string
+    """
+    now = int(time.time())
+    payload = {
+        "iat": now - 60,  # backdate 60s to absorb clock skew
+        "exp": now + 540,  # 9 minutes (GitHub maximum is 10)
+        "iss": app_id,
+    }
+    return jwt.encode(payload, private_key_pem, algorithm="RS256")
 
 
 def get_installation_access_token(
@@ -590,11 +615,12 @@ def main() -> int:
 def _main() -> int:
     logger.info("Starting GitHub ETL process with chunked processing")
 
-    github_jwt = os.environ.get("GITHUB_TOKEN") or None
-    if not github_jwt:
+    github_app_id = os.environ.get("GITHUB_APP_ID") or None
+    github_private_key = os.environ.get("GITHUB_PRIVATE_KEY") or None
+    if not github_app_id or not github_private_key:
         logger.warning(
-            "GITHUB_TOKEN (expected to be a GitHub App JWT, not a personal access token) "
-            "is not set; proceeding without authentication (suitable for testing only)"
+            "GITHUB_APP_ID and GITHUB_PRIVATE_KEY are not set; "
+            "proceeding without authentication (suitable for testing only)"
         )
 
     # Read BigQuery configuration
@@ -646,8 +672,11 @@ def _main() -> int:
     total_processed = 0
 
     for repo in github_repos:
-        # Get (or refresh) the installation access token before processing each repo
-        if github_jwt:
+        # Generate a fresh JWT and exchange it for an installation access token.
+        # The JWT is regenerated per repo (not once per run) so that long multi-repo
+        # runs don't hit the 10-minute JWT expiry mid-flight.
+        if github_app_id and github_private_key:
+            github_jwt = generate_github_jwt(github_app_id, github_private_key)
             access_token = get_installation_access_token(
                 github_jwt, repo, github_api_url
             )
