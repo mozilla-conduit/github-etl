@@ -13,7 +13,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 from urllib.parse import parse_qs, urlparse
 
 import jwt
@@ -178,6 +178,7 @@ def extract_pull_requests(
     repo: str,
     chunk_size: int = 100,
     github_api_url: str = "https://api.github.com",
+    refresh_auth: Optional[Callable[[], None]] = None,
 ) -> Iterator[list[dict]]:
     """
     Extract data from GitHub repositories in chunks.
@@ -189,6 +190,9 @@ def extract_pull_requests(
         repo: GitHub repository name
         chunk_size: Number of PRs to yield per chunk (default: 100)
         github_api_url: GitHub API base URL
+        refresh_auth: Optional callable invoked before each page fetch to refresh
+            the session's Authorization header. Use this to prevent installation
+            tokens (1-hour TTL) from expiring mid-extraction on large repos.
 
     Yields:
         List of pull request dictionaries (up to chunk_size items)
@@ -207,6 +211,8 @@ def extract_pull_requests(
     pages = 0
 
     while True:
+        if refresh_auth:
+            refresh_auth()
         resp = github_get(session, base_url, params=params)
 
         batch = resp.json()
@@ -672,30 +678,46 @@ def _main() -> int:
     total_processed = 0
 
     for repo in github_repos:
+        # Build a per-repo token refresh callable. It is called by the generator
+        # before each page fetch, so every API request (PRs + commits + reviewers +
+        # comments) uses a valid token. The access_token_cache means this only hits
+        # the GitHub API when the cached token has <60 seconds remaining.
+        refresh_auth: Optional[Callable[[], None]] = None
+        if github_app_id and github_private_key:
+
+            def _make_refresh(
+                _repo: str = repo,
+            ) -> Callable[[], None]:
+                def _refresh() -> None:
+                    try:
+                        app_jwt = generate_github_jwt(github_app_id, github_private_key)
+                        access_token = get_installation_access_token(
+                            app_jwt, _repo, github_api_url
+                        )
+                    except Exception as e:
+                        raise RuntimeError(
+                            f"Failed to obtain GitHub App access token for {_repo}: {e}. "
+                            "Check that GITHUB_APP_ID is correct and GITHUB_PRIVATE_KEY "
+                            "is a valid PEM-encoded RSA private key."
+                        ) from e
+                    session.headers["Authorization"] = f"Bearer {access_token}"
+
+                return _refresh
+
+            refresh_auth = _make_refresh()
+            # Set the token immediately so the first generator page is authenticated.
+            refresh_auth()
+
         for chunk_count, chunk in enumerate(
             extract_pull_requests(
-                session, repo, chunk_size=100, github_api_url=github_api_url
+                session,
+                repo,
+                chunk_size=100,
+                github_api_url=github_api_url,
+                refresh_auth=refresh_auth,
             ),
             start=1,
         ):
-            # Refresh the installation access token before each chunk so that
-            # long-running extractions (>1 hour) don't hit mid-repo 401s.
-            # The JWT is also regenerated here to avoid hitting the 10-minute
-            # JWT expiry on multi-repo runs.
-            if github_app_id and github_private_key:
-                try:
-                    app_jwt = generate_github_jwt(github_app_id, github_private_key)
-                    access_token = get_installation_access_token(
-                        app_jwt, repo, github_api_url
-                    )
-                except Exception as e:
-                    raise RuntimeError(
-                        f"Failed to obtain GitHub App access token for {repo}: {e}. "
-                        "Check that GITHUB_APP_ID is correct and GITHUB_PRIVATE_KEY "
-                        "is a valid PEM-encoded RSA private key."
-                    ) from e
-                session.headers["Authorization"] = f"Bearer {access_token}"
-
             logger.info(f"Processing chunk {chunk_count} with {len(chunk)} PRs")
 
             # Transform

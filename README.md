@@ -41,7 +41,7 @@ Create an env file (do **not** commit it):
 # github-etl.env
 GITHUB_REPOS=mozilla/firefox
 GITHUB_APP_ID=your_github_app_id
-GITHUB_PRIVATE_KEY=<paste PEM contents here, with literal \n newlines>
+GITHUB_PRIVATE_KEY=<paste PEM contents here, with real newline characters (do not use "\n" escape sequences)>
 BIGQUERY_PROJECT=your-gcp-project
 BIGQUERY_DATASET=your_dataset
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
@@ -59,8 +59,8 @@ docker run --rm \
 
 > **Note**: Never pass the private key inline with `-e GITHUB_PRIVATE_KEY="$(cat ...)"` —
 > that leaks the key into your shell history and makes it visible to other processes via
-> `ps`/`/proc`. Use `--env-file`, Docker secrets, or mount the PEM file and point
-> `GITHUB_PRIVATE_KEY_FILE` at it instead.
+> `ps`/`/proc`. Use `--env-file`, Docker secrets, or a secret manager that injects
+> `GITHUB_PRIVATE_KEY` as an environment variable instead.
 
 ### Environment Variables
 
@@ -83,7 +83,7 @@ docker run --rm \
 
 ### Container Specifications
 
-- **Base Image**: `python:3.11-slim` (latest stable Python)
+- **Base Image**: `python:3.14-slim` (latest stable Python)
 - **User**: `app` (uid: 1000, gid: 1000)
 - **Working Directory**: `/app`
 - **Ownership**: All files in `/app` are owned by the `app` user
