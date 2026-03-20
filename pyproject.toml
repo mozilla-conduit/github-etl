@@ -20,6 +20,7 @@ classifiers = [
 dependencies = [
     "requests>=2.25.0",
     "google-cloud-bigquery==3.25.0",
+    "PyJWT[crypto]>=2.0.0",
 ]
 
 [project.optional-dependencies]
