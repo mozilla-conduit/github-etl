@@ -39,7 +39,7 @@ Create an env file (do **not** commit it):
 
 ```bash
 # github-etl.env
-GITHUB_REPOS=mozilla/firefox
+GITHUB_REPOS=mozilla-firefox/firefox
 GITHUB_APP_ID=your_github_app_id
 GITHUB_PRIVATE_KEY=<paste PEM contents here, with real newline characters (do not use "\n" escape sequences)>
 BIGQUERY_PROJECT=your-gcp-project
