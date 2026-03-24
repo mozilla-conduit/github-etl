@@ -713,6 +713,11 @@ def _main() -> int:
 
     github_app_id = os.environ.get("GITHUB_APP_ID") or None
     github_private_key = os.environ.get("GITHUB_PRIVATE_KEY") or None
+    if github_private_key:
+        # Environment variables passed via Docker / CI often serialize newlines as the
+        # two-character sequence \n.  The RSA PEM format requires real newlines, so we
+        # normalize here before the key is used for JWT signing.
+        github_private_key = github_private_key.replace("\\n", "\n")
     if not github_app_id or not github_private_key:
         logger.warning(
             "GITHUB_APP_ID and GITHUB_PRIVATE_KEY are not set; "
