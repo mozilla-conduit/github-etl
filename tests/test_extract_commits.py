@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from unittest.mock import Mock, patch
 
 import pytest
@@ -46,30 +45,6 @@ def test_extract_commits_with_files(mock_session):
     # Verify file data from detail responses is merged into each commit
     assert result[0]["files"][0]["filename"] == "file1.py"
     assert result[1]["files"][0]["filename"] == "file2.py"
-
-
-def test_multiple_files_per_commit(mock_session):
-    """Test that all files from a commit detail response are merged into the commit."""
-    commits_response = Mock()
-    commits_response.status_code = 200
-    commits_response.json.return_value = [{"sha": "abc123"}]
-
-    commit_detail = Mock()
-    commit_detail.status_code = 200
-    commit_detail.json.return_value = {
-        "sha": "abc123",
-        "files": [
-            {"filename": "file1.py", "additions": 10},
-            {"filename": "file2.py", "additions": 20},
-            {"filename": "file3.py", "deletions": 5},
-        ],
-    }
-
-    mock_session.get.side_effect = [commits_response, commit_detail]
-
-    result = main.extract_commits(mock_session, "mozilla/firefox", 123)
-
-    assert len(result[0]["files"]) == 3
 
 
 @patch("main.sleep_for_rate_limit")

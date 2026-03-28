@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from unittest.mock import patch
 
 import pytest
@@ -18,7 +17,12 @@ def test_load_data_inserts_all_tables(mock_datetime, mock_bigquery_client):
         "comments": [{"comment_id": 123}],
     }
 
-    main.load_data(mock_bigquery_client, "test_dataset", transformed_data)
+    main.load_data(
+        mock_bigquery_client,
+        "test_dataset",
+        transformed_data,
+        use_streaming_insert=True,
+    )
 
     # Should call insert_rows_json 4 times (once per table)
     assert mock_bigquery_client.insert_rows_json.call_count == 4
@@ -36,7 +40,12 @@ def test_adds_snapshot_date(mock_datetime, mock_bigquery_client):
         "comments": [],
     }
 
-    main.load_data(mock_bigquery_client, "test_dataset", transformed_data)
+    main.load_data(
+        mock_bigquery_client,
+        "test_dataset",
+        transformed_data,
+        use_streaming_insert=True,
+    )
 
     call_args = mock_bigquery_client.insert_rows_json.call_args
     rows = call_args[0][1]
@@ -52,7 +61,9 @@ def test_constructs_correct_table_ref(mock_bigquery_client):
         "comments": [],
     }
 
-    main.load_data(mock_bigquery_client, "my_dataset", transformed_data)
+    main.load_data(
+        mock_bigquery_client, "my_dataset", transformed_data, use_streaming_insert=True
+    )
 
     call_args = mock_bigquery_client.insert_rows_json.call_args
     table_ref = call_args[0][0]
@@ -77,7 +88,12 @@ def test_skips_empty_tables_individually(mock_bigquery_client):
         "comments": [{"comment_id": 456}],
     }
 
-    main.load_data(mock_bigquery_client, "test_dataset", transformed_data)
+    main.load_data(
+        mock_bigquery_client,
+        "test_dataset",
+        transformed_data,
+        use_streaming_insert=True,
+    )
 
     # Should only call insert_rows_json twice (for PRs and comments)
     assert mock_bigquery_client.insert_rows_json.call_count == 2
@@ -92,7 +108,12 @@ def test_only_pull_requests_table(mock_bigquery_client):
         "comments": [],
     }
 
-    main.load_data(mock_bigquery_client, "test_dataset", transformed_data)
+    main.load_data(
+        mock_bigquery_client,
+        "test_dataset",
+        transformed_data,
+        use_streaming_insert=True,
+    )
 
     assert mock_bigquery_client.insert_rows_json.call_count == 1
 
@@ -111,7 +132,12 @@ def test_raises_exception_on_insert_errors(mock_bigquery_client):
     }
 
     with pytest.raises(Exception) as exc_info:
-        main.load_data(mock_bigquery_client, "test_dataset", transformed_data)
+        main.load_data(
+            mock_bigquery_client,
+            "test_dataset",
+            transformed_data,
+            use_streaming_insert=True,
+        )
 
     assert "BigQuery insert errors" in str(exc_info.value)
 
@@ -125,7 +151,12 @@ def test_verifies_client_insert_called_correctly(mock_bigquery_client):
         "comments": [],
     }
 
-    main.load_data(mock_bigquery_client, "test_dataset", transformed_data)
+    main.load_data(
+        mock_bigquery_client,
+        "test_dataset",
+        transformed_data,
+        use_streaming_insert=True,
+    )
 
     call_args = mock_bigquery_client.insert_rows_json.call_args
     table_ref, rows = call_args[0]

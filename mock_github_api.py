@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Mock GitHub API server for testing the ETL pipeline locally.
 

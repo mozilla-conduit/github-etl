@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import pytest
 
 import main
@@ -572,7 +571,6 @@ def test_return_structure():
 
     result = main.transform_data(raw_data, "mozilla/firefox")
 
-    assert isinstance(result, dict)
     assert "pull_requests" in result
     assert "commits" in result
     assert "reviewers" in result

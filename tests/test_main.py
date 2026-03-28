@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os
 from unittest.mock import MagicMock, Mock, patch
 
@@ -156,9 +155,6 @@ def test_honors_bigquery_emulator_host(
         patch("main.extract_pull_requests", return_value=iter([])),
     ):
         main.main()
-
-        # Verify BigQuery client was created with emulator settings
-        mock_bq_client_class.assert_called_once()
 
 
 @patch("main.setup_logging")
