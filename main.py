@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 GitHub ETL for Mozilla Organization Firefox repositories
 
@@ -276,7 +275,7 @@ def extract_commits(
     session: requests.Session,
     repo: str,
     pr_number: int,
-    github_api_url: str,
+    github_api_url: str = "https://api.github.com",
 ) -> list[dict]:
     """
     Extract commits and files for a specific pull request.
@@ -312,7 +311,7 @@ def extract_reviewers(
     session: requests.Session,
     repo: str,
     pr_number: int,
-    github_api_url: str,
+    github_api_url: str = "https://api.github.com",
 ) -> list[dict]:
     """
     Extract reviewers for a specific pull request.
@@ -346,7 +345,7 @@ def extract_comments(
     session: requests.Session,
     repo: str,
     pr_number: int,
-    github_api_url: str,
+    github_api_url: str = "https://api.github.com",
 ) -> list[dict]:
     """
     Extract comments for a specific pull request.
@@ -383,7 +382,7 @@ def sleep_for_rate_limit(resp: requests.Response) -> None:
     remaining = int(resp.headers.get("X-RateLimit-Remaining", 1))
     reset = int(resp.headers.get("X-RateLimit-Reset", 0))
     if remaining == 0:
-        sleep_time = max(0, reset - int(time.time())) + 5
+        sleep_time = max(0, reset - int(time.time()))
         print(
             f"Rate limit exceeded. Sleeping for {sleep_time} seconds.", file=sys.stderr
         )
@@ -688,7 +687,7 @@ def load_data(
     client: bigquery.Client,
     dataset_id: str,
     transformed_data: dict,
-    snapshot_date: str,
+    snapshot_date: Optional[str] = None,
     use_streaming_insert: bool = False,
 ) -> None:
     """
@@ -706,6 +705,9 @@ def load_data(
             jobs. In production, load jobs are preferred because rows are immediately
             mutable (no streaming buffer restriction).
     """
+
+    if snapshot_date is None:
+        snapshot_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     if not transformed_data:
         logger.warning("No data to load, skipping")
@@ -780,9 +782,9 @@ def _main() -> int:
     bigquery_dataset = os.environ.get("BIGQUERY_DATASET")
 
     if not bigquery_project:
-        raise RuntimeError("Environment variable BIGQUERY_PROJECT is required")
+        raise SystemExit("Environment variable BIGQUERY_PROJECT is required")
     if not bigquery_dataset:
-        raise RuntimeError("Environment variable BIGQUERY_DATASET is required")
+        raise SystemExit("Environment variable BIGQUERY_DATASET is required")
 
     # Setup GitHub session; the Authorization header is updated before each repo using
     # an installation access token (which may be cached)
@@ -815,9 +817,9 @@ def _main() -> int:
     github_repos = []
     github_repos_str = os.getenv("GITHUB_REPOS")
     if github_repos_str:
-        github_repos = github_repos_str.split(",")
+        github_repos = [r.strip() for r in github_repos_str.split(",") if r.strip()]
     else:
-        raise RuntimeError(
+        raise SystemExit(
             "Environment variable GITHUB_REPOS is required (format: 'owner/repo,owner/repo')"
         )
 

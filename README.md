@@ -176,6 +176,28 @@ This setup includes:
 - **BigQuery Emulator**: Local BigQuery instance for testing
 - **ETL Service**: Configured to use both mock services
 
+### Running Tests
+
+The project includes a test suite using pytest. Tests are in the `tests/` directory.
+
+Install development dependencies:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Run tests:
+
+```bash
+pytest
+```
+
+Run with coverage:
+
+```bash
+pytest --cov=. --cov-report=html
+```
+
 ### Adding Dependencies
 
 Add new Python packages to `requirements.txt` and rebuild the Docker image.
