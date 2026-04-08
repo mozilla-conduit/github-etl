@@ -28,6 +28,7 @@ def test_api_error_comments(mock_session):
     error_response = Mock()
     error_response.status_code = 404
     error_response.text = "Not Found"
+    error_response.headers = {}
 
     mock_session.get.return_value = error_response
 

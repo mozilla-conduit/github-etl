@@ -23,11 +23,13 @@ def test_rate_limit_handling(mock_sleep, mock_session):
     mock_sleep.assert_called_once()
 
 
-def test_api_error(mock_session):
-    """Test API error handling when fetching reviewers."""
+@patch("time.sleep")
+def test_api_error(mock_sleep, mock_session):
+    """Test that extract_reviewers retries on 500, then raises SystemExit."""
     error_response = Mock()
     error_response.status_code = 500
     error_response.text = "Internal Server Error"
+    error_response.headers = {}
 
     mock_session.get.return_value = error_response
 
@@ -35,3 +37,4 @@ def test_api_error(mock_session):
         main.extract_reviewers(mock_session, "mozilla/firefox", 123)
 
     assert "GitHub API error 500" in str(exc_info.value)
+    assert mock_session.get.call_count == main._MAX_RETRIES + 1

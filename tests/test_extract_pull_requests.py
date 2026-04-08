@@ -173,6 +173,7 @@ def test_handles_api_error_404(mock_session):
     mock_response = Mock()
     mock_response.status_code = 404
     mock_response.text = "Not Found"
+    mock_response.headers = {}
 
     mock_session.get.return_value = mock_response
 
@@ -182,11 +183,13 @@ def test_handles_api_error_404(mock_session):
     assert "GitHub API error 404" in str(exc_info.value)
 
 
-def test_handles_api_error_500(mock_session):
-    """Test that extract_pull_requests raises SystemExit on 500."""
+@patch("time.sleep")
+def test_handles_api_error_500(mock_sleep, mock_session):
+    """Test that extract_pull_requests retries on 500, then raises SystemExit."""
     mock_response = Mock()
     mock_response.status_code = 500
     mock_response.text = "Internal Server Error"
+    mock_response.headers = {}
 
     mock_session.get.return_value = mock_response
 
@@ -194,6 +197,7 @@ def test_handles_api_error_500(mock_session):
         list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
     assert "GitHub API error 500" in str(exc_info.value)
+    assert mock_session.get.call_count == main._MAX_RETRIES + 1
 
 
 def test_stops_on_empty_batch(mock_session):

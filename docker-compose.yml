@@ -32,7 +32,6 @@ services:
     environment:
       # GitHub Configuration
       GITHUB_REPOS: "mozilla-firefox/firefox"
-      GITHUB_TOKEN: ""  # Not needed for mock API
 
       # Use mock GitHub API instead of real API
       GITHUB_API_URL: "http://mock-github-api:5000"
