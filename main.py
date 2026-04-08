@@ -479,8 +479,12 @@ def github_get(
                 refresh_auth()
                 auth_retries -= 1
                 continue
+            if refresh_auth is None:
+                auth_error_detail = "with no refresh_auth configured"
+            else:
+                auth_error_detail = f"after {_MAX_AUTH_RETRIES} refresh attempts"
             raise SystemExit(
-                f"GitHub API auth error 401 for {url} after token refresh: "
+                f"GitHub API auth error 401 for {url} {auth_error_detail}: "
                 f"{resp.text or 'No response text'}"
             )
 
@@ -982,7 +986,7 @@ def _main() -> int:
                 logger.info(
                     f"Completed chunk {chunk_count}. Total PRs processed: {total_processed}"
                 )
-        except SystemExit as exc:
+        except (SystemExit, RuntimeError) as exc:
             logger.error(f"Failed to process repo {repo}: {exc}")
             failed_repos.append(repo)
             continue

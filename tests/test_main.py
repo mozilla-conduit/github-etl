@@ -157,6 +157,37 @@ def test_honors_bigquery_emulator_host(
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
+def test_creates_session_with_headers(
+    mock_session_class, mock_bq_client, mock_setup_logging
+):
+    """Test that session is created with Accept and User-Agent headers."""
+    mock_session = MagicMock()
+    mock_session_class.return_value = mock_session
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "GITHUB_REPOS": "mozilla/firefox",
+                "BIGQUERY_PROJECT": "test",
+                "BIGQUERY_DATASET": "test",
+            },
+            clear=True,
+        ),
+        patch("main.extract_pull_requests", return_value=iter([])),
+    ):
+        main.main()
+
+        # Verify session headers were set
+        assert mock_session.headers.update.called
+        call_args = mock_session.headers.update.call_args[0][0]
+        assert "Accept" in call_args
+        assert "User-Agent" in call_args
+
+
+@patch("main.setup_logging")
+@patch("main.bigquery.Client")
+@patch("requests.Session")
 @patch("main.extract_pull_requests")
 @patch("main.transform_data")
 @patch("main.load_data")
