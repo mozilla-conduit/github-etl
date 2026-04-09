@@ -169,31 +169,35 @@ def test_handles_rate_limit(mock_sleep, mock_session):
 
 
 def test_handles_api_error_404(mock_session):
-    """Test that extract_pull_requests raises SystemExit on 404."""
+    """Test that extract_pull_requests raises TooManyRetriesError on 404."""
     mock_response = Mock()
     mock_response.status_code = 404
     mock_response.text = "Not Found"
+    mock_response.headers = {"Content-Type": "application/json"}
 
     mock_session.get.return_value = mock_response
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(main.TooManyRetriesError) as exc_info:
         list(main.extract_pull_requests(mock_session, "mozilla/nonexistent"))
 
     assert "GitHub API error 404" in str(exc_info.value)
 
 
-def test_handles_api_error_500(mock_session):
-    """Test that extract_pull_requests raises SystemExit on 500."""
+@patch("time.sleep")
+def test_handles_api_error_500(mock_sleep, mock_session):
+    """Test that extract_pull_requests retries on 500, then raises TooManyRetriesError."""
     mock_response = Mock()
     mock_response.status_code = 500
     mock_response.text = "Internal Server Error"
+    mock_response.headers = {"Content-Type": "application/json"}
 
     mock_session.get.return_value = mock_response
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(main.TooManyRetriesError) as exc_info:
         list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
 
     assert "GitHub API error 500" in str(exc_info.value)
+    assert mock_session.get.call_count == main._MAX_RETRIES + 1
 
 
 def test_stops_on_empty_batch(mock_session):

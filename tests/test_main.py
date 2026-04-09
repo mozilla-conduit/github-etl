@@ -61,10 +61,10 @@ def test_requires_bigquery_dataset(
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")
-def test_github_token_optional_with_warning(
+def test_runs_without_auth_credentials(
     mock_session_class, mock_bq_client, mock_setup_logging
 ):
-    """Test that GITHUB_TOKEN is optional but warns if missing."""
+    """Test that auth credentials are optional; script runs with a warning."""
     with (
         patch.dict(
             os.environ,
@@ -96,7 +96,6 @@ def test_splits_github_repos_by_comma(
                 "GITHUB_REPOS": "mozilla/firefox,mozilla/gecko-dev",
                 "BIGQUERY_PROJECT": "test",
                 "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "token",
             },
             clear=True,
         ),
@@ -120,7 +119,6 @@ def test_honors_github_api_url(mock_session_class, mock_bq_client, mock_setup_lo
                 "GITHUB_REPOS": "mozilla/firefox",
                 "BIGQUERY_PROJECT": "test",
                 "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "token",
                 "GITHUB_API_URL": "https://custom-api.example.com",
             },
             clear=True,
@@ -147,7 +145,6 @@ def test_honors_bigquery_emulator_host(
                 "GITHUB_REPOS": "mozilla/firefox",
                 "BIGQUERY_PROJECT": "test",
                 "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "token",
                 "BIGQUERY_EMULATOR_HOST": "http://localhost:9050",
             },
             clear=True,
@@ -155,6 +152,37 @@ def test_honors_bigquery_emulator_host(
         patch("main.extract_pull_requests", return_value=iter([])),
     ):
         main.main()
+
+
+@patch("main.setup_logging")
+@patch("main.bigquery.Client")
+@patch("requests.Session")
+def test_creates_session_with_headers(
+    mock_session_class, mock_bq_client, mock_setup_logging
+):
+    """Test that session is created with Accept and User-Agent headers."""
+    mock_session = MagicMock()
+    mock_session_class.return_value = mock_session
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "GITHUB_REPOS": "mozilla/firefox",
+                "BIGQUERY_PROJECT": "test",
+                "BIGQUERY_DATASET": "test",
+            },
+            clear=True,
+        ),
+        patch("main.extract_pull_requests", return_value=iter([])),
+    ):
+        main.main()
+
+        # Verify session headers were set
+        assert mock_session.headers.update.called
+        call_args = mock_session.headers.update.call_args[0][0]
+        assert "Accept" in call_args
+        assert "User-Agent" in call_args
 
 
 @patch("main.setup_logging")
@@ -186,7 +214,6 @@ def test_single_repo_successful_etl(
             "GITHUB_REPOS": "mozilla/firefox",
             "BIGQUERY_PROJECT": "test",
             "BIGQUERY_DATASET": "test",
-            "GITHUB_TOKEN": "token",
         },
         clear=True,
     ):
@@ -225,7 +252,6 @@ def test_multiple_repos_processing(
             "GITHUB_REPOS": "mozilla/firefox,mozilla/gecko-dev,mozilla/addons",
             "BIGQUERY_PROJECT": "test",
             "BIGQUERY_DATASET": "test",
-            "GITHUB_TOKEN": "token",
         },
         clear=True,
     ):
@@ -272,7 +298,6 @@ def test_processes_chunks_iteratively(
             "GITHUB_REPOS": "mozilla/firefox",
             "BIGQUERY_PROJECT": "test",
             "BIGQUERY_DATASET": "test",
-            "GITHUB_TOKEN": "token",
         },
         clear=True,
     ):
@@ -298,7 +323,6 @@ def test_returns_zero_on_success(
                 "GITHUB_REPOS": "mozilla/firefox",
                 "BIGQUERY_PROJECT": "test",
                 "BIGQUERY_DATASET": "test",
-                "GITHUB_TOKEN": "token",
             },
             clear=True,
         ),
@@ -347,7 +371,6 @@ def test_full_etl_flow_transforms_data_correctly(
             "GITHUB_REPOS": "mozilla/firefox",
             "BIGQUERY_PROJECT": "test",
             "BIGQUERY_DATASET": "test",
-            "GITHUB_TOKEN": "token",
         },
         clear=True,
     ):
@@ -402,7 +425,6 @@ def test_bug_id_extraction_through_pipeline(
             "GITHUB_REPOS": "mozilla/firefox",
             "BIGQUERY_PROJECT": "test",
             "BIGQUERY_DATASET": "test",
-            "GITHUB_TOKEN": "token",
         },
         clear=True,
     ):
@@ -460,7 +482,6 @@ def test_pagination_through_full_flow(
             "GITHUB_REPOS": "mozilla/firefox",
             "BIGQUERY_PROJECT": "test",
             "BIGQUERY_DATASET": "test",
-            "GITHUB_TOKEN": "token",
         },
         clear=True,
     ):
@@ -468,3 +489,51 @@ def test_pagination_through_full_flow(
 
     # Should be called twice (once per chunk/page)
     assert mock_load.call_count == 2
+
+
+@patch("main.setup_logging")
+@patch("main.bigquery.Client")
+@patch("requests.Session")
+@patch("main.extract_pull_requests")
+@patch("main.transform_data")
+@patch("main.load_data")
+def test_repo_failure_continues_to_next_repo(
+    mock_load,
+    mock_transform,
+    mock_extract,
+    mock_session_class,
+    mock_bq_client,
+    mock_setup_logging,
+):
+    """A fatal error on one repo should not prevent other repos from being processed."""
+
+    def extract_side_effect(*args, **kwargs):
+        repo = args[1]
+        if repo == "mozilla/firefox":
+            raise main.TooManyRetriesError(
+                "GitHub API error 502 for https://api.github.com/..."
+            )
+        return iter([[{"number": 1}]])
+
+    mock_extract.side_effect = extract_side_effect
+    mock_transform.return_value = {
+        "pull_requests": [{"pull_request_id": 1}],
+        "commits": [],
+        "reviewers": [],
+        "comments": [],
+    }
+
+    with patch.dict(
+        os.environ,
+        {
+            "GITHUB_REPOS": "mozilla/firefox,mozilla/gecko-dev",
+            "BIGQUERY_PROJECT": "test",
+            "BIGQUERY_DATASET": "test",
+        },
+        clear=True,
+    ):
+        result = main.main()
+
+    assert result == 1  # partial failure
+    assert mock_extract.call_count == 2  # both repos were attempted
+    mock_load.assert_called_once()  # only the successful repo loaded data
