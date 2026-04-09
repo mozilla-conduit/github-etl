@@ -25,15 +25,15 @@ def test_rate_limit_handling(mock_sleep, mock_session):
 
 @patch("time.sleep")
 def test_api_error(mock_sleep, mock_session):
-    """Test that extract_reviewers retries on 500, then raises SystemExit."""
+    """Test that extract_reviewers retries on 500, then raises TooManyRetriesError."""
     error_response = Mock()
     error_response.status_code = 500
     error_response.text = "Internal Server Error"
-    error_response.headers = {}
+    error_response.headers = {"Content-Type": "application/json"}
 
     mock_session.get.return_value = error_response
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(main.TooManyRetriesError) as exc_info:
         main.extract_reviewers(mock_session, "mozilla/firefox", 123)
 
     assert "GitHub API error 500" in str(exc_info.value)

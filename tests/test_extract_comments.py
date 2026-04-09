@@ -28,11 +28,11 @@ def test_api_error_comments(mock_session):
     error_response = Mock()
     error_response.status_code = 404
     error_response.text = "Not Found"
-    error_response.headers = {}
+    error_response.headers = {"Content-Type": "application/json"}
 
     mock_session.get.return_value = error_response
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(main.TooManyRetriesError) as exc_info:
         main.extract_comments(mock_session, "mozilla/firefox", 123)
 
     assert "GitHub API error 404" in str(exc_info.value)

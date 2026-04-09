@@ -510,7 +510,9 @@ def test_repo_failure_continues_to_next_repo(
     def extract_side_effect(*args, **kwargs):
         repo = args[1]
         if repo == "mozilla/firefox":
-            raise SystemExit("GitHub API error 502 for https://api.github.com/...")
+            raise main.TooManyRetriesError(
+                "GitHub API error 502 for https://api.github.com/..."
+            )
         return iter([[{"number": 1}]])
 
     mock_extract.side_effect = extract_side_effect

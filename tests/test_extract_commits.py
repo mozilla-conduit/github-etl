@@ -68,15 +68,15 @@ def test_rate_limit_on_commits_list(mock_sleep, mock_session):
 
 @patch("time.sleep")
 def test_api_error_on_commits_list(mock_sleep, mock_session):
-    """Test that extract_commits retries on 500, then raises SystemExit."""
+    """Test that extract_commits retries on 500, then raises TooManyRetriesError."""
     error_response = Mock()
     error_response.status_code = 500
     error_response.text = "Internal Server Error"
-    error_response.headers = {}
+    error_response.headers = {"Content-Type": "application/json"}
 
     mock_session.get.return_value = error_response
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(main.TooManyRetriesError) as exc_info:
         main.extract_commits(mock_session, "mozilla/firefox", 123)
 
     assert "GitHub API error 500" in str(exc_info.value)
@@ -92,11 +92,11 @@ def test_api_error_on_individual_commit(mock_session):
     commit_error = Mock()
     commit_error.status_code = 404
     commit_error.text = "Commit not found"
-    commit_error.headers = {}
+    commit_error.headers = {"Content-Type": "application/json"}
 
     mock_session.get.side_effect = [commits_response, commit_error]
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(main.TooManyRetriesError) as exc_info:
         main.extract_commits(mock_session, "mozilla/firefox", 123)
 
     assert "GitHub API error 404" in str(exc_info.value)

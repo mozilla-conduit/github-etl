@@ -12,7 +12,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator
 from urllib.parse import parse_qs, urlparse
 
 import jwt
@@ -26,13 +26,23 @@ BUG_RE = re.compile(r"\b(?:bug|b=)\s*#?(\d+)\b", re.I)
 
 logger = logging.getLogger(__name__)
 
-_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({500, 502, 503, 504})
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 _MAX_RETRIES: int = 5
 _RETRY_BASE_DELAY: float = 1.0
 _RETRY_MAX_DELAY: float = 60.0
 _RETRY_MULTIPLIER: float = 2.0
 _MAX_AUTH_RETRIES: int = 2
 _REQUEST_TIMEOUT: float = 30.0
+
+
+class TooManyRetriesError(Exception):
+    """Raised when all retry attempts for a GitHub API request are exhausted."""
+
+
+def _apply_backoff(delay: float) -> float:
+    """Sleep for *delay* seconds and return the next (capped) delay value."""
+    time.sleep(delay)
+    return min(delay * _RETRY_MULTIPLIER, _RETRY_MAX_DELAY)
 
 
 @dataclass(frozen=True)
@@ -186,7 +196,7 @@ def extract_pull_requests(
     repo: str,
     chunk_size: int = 100,
     github_api_url: str = "https://api.github.com",
-    refresh_auth: Optional[Callable[[], None]] = None,
+    refresh_auth: Callable[[], None] | None = None,
 ) -> Iterator[list[dict]]:
     """
     Extract data from GitHub repositories in chunks.
@@ -284,7 +294,7 @@ def extract_commits(
     repo: str,
     pr_number: int,
     github_api_url: str = "https://api.github.com",
-    refresh_auth: Optional[Callable[[], None]] = None,
+    refresh_auth: Callable[[], None] | None = None,
 ) -> list[dict]:
     """
     Extract commits and files for a specific pull request.
@@ -321,7 +331,7 @@ def extract_reviewers(
     repo: str,
     pr_number: int,
     github_api_url: str = "https://api.github.com",
-    refresh_auth: Optional[Callable[[], None]] = None,
+    refresh_auth: Callable[[], None] | None = None,
 ) -> list[dict]:
     """
     Extract reviewers for a specific pull request.
@@ -356,7 +366,7 @@ def extract_comments(
     repo: str,
     pr_number: int,
     github_api_url: str = "https://api.github.com",
-    refresh_auth: Optional[Callable[[], None]] = None,
+    refresh_auth: Callable[[], None] | None = None,
 ) -> list[dict]:
     """
     Extract comments for a specific pull request.
@@ -401,16 +411,16 @@ def sleep_for_rate_limit(resp: requests.Response) -> None:
 
 
 def _is_html_error_page(resp: requests.Response) -> bool:
-    """Return True when GitHub returns an HTML error page instead of JSON."""
+    """Return True when GitHub returns a non-JSON error response."""
     content_type = resp.headers.get("Content-Type", "")
-    return "text/html" in content_type and resp.status_code >= 400
+    return "application/json" not in content_type and resp.status_code >= 400
 
 
 def github_get(
     session: requests.Session,
     url: str,
-    params: Optional[dict] = None,
-    refresh_auth: Optional[Callable[[], None]] = None,
+    params: dict | None = None,
+    refresh_auth: Callable[[], None] | None = None,
 ) -> requests.Response:
     """
     Make a GitHub API GET request, retrying on transient errors and expired tokens.
@@ -453,11 +463,10 @@ def github_get(
                     f"Network error for {url}: {exc}. "
                     f"Retrying in {backoff:.0f}s ({transient_retries} retries left)"
                 )
-                time.sleep(backoff)
-                backoff = min(backoff * _RETRY_MULTIPLIER, _RETRY_MAX_DELAY)
+                backoff = _apply_backoff(backoff)
                 transient_retries -= 1
                 continue
-            raise SystemExit(
+            raise TooManyRetriesError(
                 f"GitHub API request failed after retries for {url}: {exc}"
             )
 
@@ -465,7 +474,7 @@ def github_get(
             return resp
 
         if (
-            resp.status_code == 403
+            resp.status_code in (403, 429)
             and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
         ):
             sleep_for_rate_limit(resp)
@@ -483,7 +492,7 @@ def github_get(
                 auth_error_detail = "with no refresh_auth configured"
             else:
                 auth_error_detail = f"after {_MAX_AUTH_RETRIES} refresh attempts"
-            raise SystemExit(
+            raise TooManyRetriesError(
                 f"GitHub API auth error 401 for {url} {auth_error_detail}: "
                 f"{resp.text or 'No response text'}"
             )
@@ -494,16 +503,15 @@ def github_get(
                     f"Transient error {resp.status_code} for {url}. "
                     f"Retrying in {backoff:.0f}s ({transient_retries} retries left)"
                 )
-                time.sleep(backoff)
-                backoff = min(backoff * _RETRY_MULTIPLIER, _RETRY_MAX_DELAY)
+                backoff = _apply_backoff(backoff)
                 transient_retries -= 1
                 continue
-            raise SystemExit(
+            raise TooManyRetriesError(
                 f"GitHub API error {resp.status_code} for {url} after {_MAX_RETRIES} retries: "
                 f"{resp.text or 'No response text'}"
             )
 
-        raise SystemExit(
+        raise TooManyRetriesError(
             f"GitHub API error {resp.status_code} for {url}: {resp.text or 'No response text'}"
         )
 
@@ -772,7 +780,7 @@ def load_data(
     client: bigquery.Client,
     dataset_id: str,
     transformed_data: dict,
-    snapshot_date: Optional[str] = None,
+    snapshot_date: str | None = None,
     use_streaming_insert: bool = False,
 ) -> None:
     """
@@ -930,7 +938,7 @@ def _main() -> int:
             # before each page fetch, so every API request (PRs + commits + reviewers +
             # comments) uses a valid token. The access_token_cache means this only hits
             # the GitHub API when the cached token has <60 seconds remaining.
-            refresh_auth: Optional[Callable[[], None]] = None
+            refresh_auth: Callable[[], None] | None = None
             if github_app_id and github_private_key:
 
                 def _make_refresh(
@@ -986,7 +994,7 @@ def _main() -> int:
                 logger.info(
                     f"Completed chunk {chunk_count}. Total PRs processed: {total_processed}"
                 )
-        except (SystemExit, RuntimeError) as exc:
+        except (TooManyRetriesError, RuntimeError) as exc:
             logger.error(f"Failed to process repo {repo}: {exc}")
             failed_repos.append(repo)
             continue

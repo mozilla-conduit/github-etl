@@ -72,11 +72,11 @@ def test_refreshes_auth_on_401(mock_session):
 
 
 def test_401_without_refresh_auth_fails_immediately(mock_session):
-    """401 with no refresh_auth callable raises SystemExit without retrying."""
+    """401 with no refresh_auth callable raises TooManyRetriesError without retrying."""
     unauthorized = _make_response(401, "Bad credentials")
     mock_session.get.return_value = unauthorized
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(main.TooManyRetriesError) as exc_info:
         main.github_get(mock_session, "https://api.github.com/repos/test")
 
     assert "401" in str(exc_info.value)
@@ -85,13 +85,13 @@ def test_401_without_refresh_auth_fails_immediately(mock_session):
 
 @patch("time.sleep")
 def test_401_exhausts_auth_retries(mock_sleep, mock_session):
-    """Persistent 401 responses exhaust the auth retry budget and raise SystemExit."""
+    """Persistent 401 responses exhaust the auth retry budget and raise TooManyRetriesError."""
     unauthorized = _make_response(401, "Bad credentials")
     mock_session.get.return_value = unauthorized
 
     refresh_auth = Mock()
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(main.TooManyRetriesError) as exc_info:
         main.github_get(
             mock_session,
             "https://api.github.com/repos/test",
