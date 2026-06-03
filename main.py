@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,9 @@ _RETRY_MULTIPLIER: float = 2.0
 _MAX_AUTH_RETRIES: int = 2
 _REQUEST_TIMEOUT: float = 30.0
 
+# Default ceiling on concurrent repo workers (overridable via GITHUB_ETL_MAX_WORKERS).
+_DEFAULT_MAX_WORKERS: int = 8
+
 
 class TooManyRetriesError(Exception):
     """Raised when all retry attempts for a GitHub API request are exhausted."""
@@ -54,6 +58,12 @@ class AccessToken:
 
 access_token_cache: dict[int, AccessToken] = {}
 repo_installation_cache: dict[str, int] = {}
+
+# Serializes installation-token creation across repo worker threads. Without it,
+# all workers miss the cache on startup and each POST /access_tokens for the same
+# installation, producing redundant token creations and a burst against GitHub's
+# per-installation rate limit. The lock is only held on the slow (cache-miss) path.
+_token_lock = threading.Lock()
 
 
 def generate_github_jwt(app_id: str, private_key_pem: str) -> str:
@@ -134,52 +144,72 @@ def get_installation_access_token(
             )
         repo_installation_cache[repo] = installation_id
 
-    now = datetime.now(timezone.utc)
-    cached = access_token_cache.get(installation_id)
-    if cached is not None and cached.expires_at > now + timedelta(seconds=60):
-        logger.info(
-            f"Reusing cached access token for installation {installation_id}, "
-            f"expires at {cached.expires_at}"
-        )
-        return cached.token
+    def _cached_token() -> str | None:
+        cached = access_token_cache.get(installation_id)
+        if cached is not None and cached.expires_at > datetime.now(
+            timezone.utc
+        ) + timedelta(seconds=60):
+            logger.info(
+                f"Reusing cached access token for installation {installation_id}, "
+                f"expires at {cached.expires_at}"
+            )
+            return cached.token
+        return None
 
-    logger.info(
-        f"Fetching new GitHub App installation access token for installation {installation_id}"
-    )
-    resp = session.post(
-        f"{github_api_url}/app/installations/{installation_id}/access_tokens",
-    )
-    if (
-        resp.status_code == 403
-        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-    ):
-        sleep_for_rate_limit(resp)
+    # Fast path: serve a still-valid cached token without taking the lock.
+    token = _cached_token()
+    if token is not None:
+        return token
+
+    # Slow path: serialize creation so concurrent workers sharing an installation
+    # don't each POST /access_tokens. Re-check the cache once the lock is held in
+    # case another thread populated it while we waited.
+    with _token_lock:
+        token = _cached_token()
+        if token is not None:
+            return token
+
+        logger.info(
+            f"Fetching new GitHub App installation access token for installation {installation_id}"
+        )
         resp = session.post(
             f"{github_api_url}/app/installations/{installation_id}/access_tokens",
         )
-    if resp.status_code != 201:
-        raise RuntimeError(
-            f"Failed to get installation access token: {resp.status_code}: {resp.text}"
-        )
+        if (
+            resp.status_code == 403
+            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
+        ):
+            sleep_for_rate_limit(resp)
+            resp = session.post(
+                f"{github_api_url}/app/installations/{installation_id}/access_tokens",
+            )
+        if resp.status_code != 201:
+            raise RuntimeError(
+                f"Failed to get installation access token: {resp.status_code}: {resp.text}"
+            )
 
-    try:
-        data = resp.json()
-    except requests.exceptions.JSONDecodeError as e:
-        raise RuntimeError(f"Failed to parse access token response: {e}: {resp.text}")
-    try:
-        access_token = AccessToken(
-            token=data["token"],
-            expires_at=datetime.fromisoformat(data["expires_at"]),
-        )
-    except KeyError as e:
-        raise RuntimeError(
-            f"Unexpected access token response structure, missing key {e}: {resp.text}"
-        )
-    except ValueError as e:
-        raise RuntimeError(f"Invalid expires_at format in access token response: {e}")
-    access_token_cache[installation_id] = access_token
-    logger.info(f"Obtained new access token, expires at {access_token.expires_at}")
-    return access_token.token
+        try:
+            data = resp.json()
+        except requests.exceptions.JSONDecodeError as e:
+            raise RuntimeError(
+                f"Failed to parse access token response: {e}: {resp.text}"
+            )
+        try:
+            access_token = AccessToken(
+                token=data["token"],
+                expires_at=datetime.fromisoformat(data["expires_at"]),
+            )
+        except KeyError as e:
+            raise RuntimeError(
+                f"Unexpected access token response structure, missing key {e}: {resp.text}"
+            )
+        except ValueError as e:
+            raise RuntimeError(
+                f"Invalid expires_at format in access token response: {e}"
+            )
+        access_token_cache[installation_id] = access_token
+        logger.info(f"Obtained new access token, expires at {access_token.expires_at}")
+        return access_token.token
 
 
 def setup_logging() -> None:
@@ -837,9 +867,6 @@ def load_data(
         )
 
 
-_DEFAULT_MAX_WORKERS: int = 8
-
-
 def _resolve_max_workers(repo_count: int) -> int:
     """
     Decide how many repos to process concurrently.
@@ -1081,7 +1108,11 @@ def _main() -> int:
             repo = future_to_repo[future]
             try:
                 processed = future.result()
-            except (TooManyRetriesError, RuntimeError) as exc:
+            except Exception as exc:
+                # Catch broadly so one repo's failure (a TooManyRetriesError, a
+                # RuntimeError, or a bare Exception from load_data) is recorded as a
+                # failed repo rather than propagating out of the executor and
+                # discarding the results of other in-flight repos.
                 logger.error(f"Failed to process repo {repo}: {exc}")
                 failed_repos.append(repo)
                 continue

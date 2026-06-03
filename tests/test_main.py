@@ -540,6 +540,63 @@ def test_repo_failure_continues_to_next_repo(
     mock_load.assert_called_once()  # only the successful repo loaded data
 
 
+@patch("main.setup_logging")
+@patch("main.bigquery.Client")
+@patch("requests.Session")
+@patch("main.extract_pull_requests")
+@patch("main.transform_data")
+@patch("main.load_data")
+def test_bare_exception_on_one_repo_is_isolated(
+    mock_load,
+    mock_transform,
+    mock_extract,
+    mock_session_class,
+    mock_bq_client,
+    mock_setup_logging,
+):
+    """A bare Exception (e.g. from load_data) on one repo must not abort the others.
+
+    The executor catches broadly, so the failing repo is recorded in failed_repos
+    (overall exit code 1) while the healthy repo still completes its load.
+    """
+    # Fresh iterator per repo (a shared return_value iterator would be exhausted
+    # by whichever repo consumes it first).
+    mock_extract.side_effect = lambda *a, **k: iter([[{"number": 1}]])
+
+    def load_side_effect(client, dataset, transformed, *args, **kwargs):
+        # Fail only for firefox; gecko-dev should still load successfully.
+        if transformed["pull_requests"][0].get("repo_marker") == "fail":
+            raise Exception("BigQuery insert errors for table pull_requests")
+
+    # Tag the transform output per repo so load_side_effect can decide which fails.
+    def transform_side_effect(chunk, repo):
+        marker = "fail" if repo == "mozilla/firefox" else "ok"
+        return {
+            "pull_requests": [{"pull_request_id": 1, "repo_marker": marker}],
+            "commits": [],
+            "reviewers": [],
+            "comments": [],
+        }
+
+    mock_transform.side_effect = transform_side_effect
+    mock_load.side_effect = load_side_effect
+
+    with patch.dict(
+        os.environ,
+        {
+            "GITHUB_REPOS": "mozilla/firefox,mozilla/gecko-dev",
+            "BIGQUERY_PROJECT": "test",
+            "BIGQUERY_DATASET": "test",
+        },
+        clear=True,
+    ):
+        result = main.main()
+
+    assert result == 1  # partial failure recorded, run did not abort
+    assert mock_extract.call_count == 2  # both repos were attempted
+    assert mock_load.call_count == 2  # both repos reached the load step
+
+
 class TestResolveMaxWorkers:
     """Tests for _resolve_max_workers worker-count resolution."""
 
