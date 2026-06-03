@@ -59,11 +59,24 @@ class AccessToken:
 access_token_cache: dict[int, AccessToken] = {}
 repo_installation_cache: dict[str, int] = {}
 
-# Serializes installation-token creation across repo worker threads. Without it,
-# all workers miss the cache on startup and each POST /access_tokens for the same
-# installation, producing redundant token creations and a burst against GitHub's
-# per-installation rate limit. The lock is only held on the slow (cache-miss) path.
-_token_lock = threading.Lock()
+# Serializes installation-token creation per installation. Without it, all workers
+# sharing an installation miss the cache on startup and each POST /access_tokens,
+# producing redundant token creations and a burst against GitHub's per-installation
+# rate limit. Locks are keyed by installation ID so a cache miss (or rate-limit
+# sleep) for one installation never blocks token creation for another. A lock is
+# only held on the slow (cache-miss) path. The guard protects the map itself.
+_token_locks: dict[int, threading.Lock] = {}
+_token_locks_guard = threading.Lock()
+
+
+def _lock_for_installation(installation_id: int) -> threading.Lock:
+    """Return the (lazily created) token-creation lock for an installation."""
+    with _token_locks_guard:
+        lock = _token_locks.get(installation_id)
+        if lock is None:
+            lock = threading.Lock()
+            _token_locks[installation_id] = lock
+        return lock
 
 
 def generate_github_jwt(app_id: str, private_key_pem: str) -> str:
@@ -162,9 +175,11 @@ def get_installation_access_token(
         return token
 
     # Slow path: serialize creation so concurrent workers sharing an installation
-    # don't each POST /access_tokens. Re-check the cache once the lock is held in
-    # case another thread populated it while we waited.
-    with _token_lock:
+    # don't each POST /access_tokens. The lock is specific to this installation,
+    # so a rate-limit sleep here never blocks workers on other installations.
+    # Re-check the cache once the lock is held in case another thread populated it
+    # while we waited.
+    with _lock_for_installation(installation_id):
         token = _cached_token()
         if token is not None:
             return token
@@ -1069,7 +1084,12 @@ def _main() -> int:
     github_repos = []
     github_repos_str = os.getenv("GITHUB_REPOS")
     if github_repos_str:
-        github_repos = [r.strip() for r in github_repos_str.split(",") if r.strip()]
+        # Deduplicate while preserving order: with concurrent processing, a repo
+        # listed twice would otherwise have its delete_existing_snapshot() and
+        # load_data() interleave with its duplicate, corrupting the snapshot.
+        github_repos = list(
+            dict.fromkeys(r.strip() for r in github_repos_str.split(",") if r.strip())
+        )
     else:
         raise SystemExit(
             "Environment variable GITHUB_REPOS is required (format: 'owner/repo,owner/repo')"
@@ -1112,8 +1132,9 @@ def _main() -> int:
                 # Catch broadly so one repo's failure (a TooManyRetriesError, a
                 # RuntimeError, or a bare Exception from load_data) is recorded as a
                 # failed repo rather than propagating out of the executor and
-                # discarding the results of other in-flight repos.
-                logger.error(f"Failed to process repo {repo}: {exc}")
+                # discarding the results of other in-flight repos. logger.exception
+                # records the worker thread's traceback for debugging in CI/prod.
+                logger.exception(f"Failed to process repo {repo}: {exc}")
                 failed_repos.append(repo)
                 continue
             total_processed += processed
