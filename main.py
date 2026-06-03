@@ -885,8 +885,8 @@ def process_repo(
 
     This is the unit of work executed per worker thread. It creates its own
     ``requests.Session`` so that repos processed concurrently never share or
-    clobber each other's ``Authorization`` header (installation tokens are
-    per-repo and the header is rewritten on every refresh).
+    clobber each other's ``Authorization`` header (installation access tokens are
+    cached per installation, and the header is rewritten on refresh).
 
     Args:
         repo: Repository in "owner/repo" format
