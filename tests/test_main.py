@@ -1,4 +1,5 @@
 import os
+import threading
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -537,3 +538,88 @@ def test_repo_failure_continues_to_next_repo(
     assert result == 1  # partial failure
     assert mock_extract.call_count == 2  # both repos were attempted
     mock_load.assert_called_once()  # only the successful repo loaded data
+
+
+class TestResolveMaxWorkers:
+    """Tests for _resolve_max_workers worker-count resolution."""
+
+    def test_defaults_to_repo_count_when_below_cap(self):
+        with patch.dict(os.environ, {}, clear=True):
+            assert main._resolve_max_workers(3) == 3
+
+    def test_caps_at_default_for_large_repo_lists(self):
+        with patch.dict(os.environ, {}, clear=True):
+            assert main._resolve_max_workers(100) == main._DEFAULT_MAX_WORKERS
+
+    def test_never_returns_less_than_one(self):
+        with patch.dict(os.environ, {}, clear=True):
+            assert main._resolve_max_workers(0) == 1
+
+    def test_env_override_raises_cap(self):
+        with patch.dict(os.environ, {"GITHUB_ETL_MAX_WORKERS": "20"}, clear=True):
+            assert main._resolve_max_workers(15) == 15
+
+    def test_env_override_still_bounded_by_repo_count(self):
+        with patch.dict(os.environ, {"GITHUB_ETL_MAX_WORKERS": "20"}, clear=True):
+            assert main._resolve_max_workers(2) == 2
+
+    def test_invalid_env_override_falls_back_to_default(self):
+        with patch.dict(os.environ, {"GITHUB_ETL_MAX_WORKERS": "abc"}, clear=True):
+            assert main._resolve_max_workers(100) == main._DEFAULT_MAX_WORKERS
+
+    def test_non_positive_env_override_falls_back_to_default(self):
+        with patch.dict(os.environ, {"GITHUB_ETL_MAX_WORKERS": "0"}, clear=True):
+            assert main._resolve_max_workers(100) == main._DEFAULT_MAX_WORKERS
+
+
+@patch("main.setup_logging")
+@patch("main.bigquery.Client")
+@patch("requests.Session")
+@patch("main.transform_data")
+@patch("main.load_data")
+def test_repos_are_processed_concurrently(
+    mock_load,
+    mock_transform,
+    mock_session_class,
+    mock_bq_client,
+    mock_setup_logging,
+):
+    """Repos run in parallel: a barrier that all repos must reach proves overlap.
+
+    If processing were sequential, the first repo would block forever at the
+    barrier (the others never start), so barrier.wait() would time out and the
+    test would fail with BrokenBarrierError.
+    """
+    repos = "mozilla/firefox,mozilla/gecko-dev,mozilla/addons"
+    num_repos = len(repos.split(","))
+    barrier = threading.Barrier(num_repos, timeout=5)
+
+    def extract_side_effect(*args, **kwargs):
+        # Every repo's worker must reach the barrier before any may proceed.
+        barrier.wait()
+        return iter([[{"number": 1}]])
+
+    mock_transform.return_value = {
+        "pull_requests": [{"pull_request_id": 1}],
+        "commits": [],
+        "reviewers": [],
+        "comments": [],
+    }
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "GITHUB_REPOS": repos,
+                "BIGQUERY_PROJECT": "test",
+                "BIGQUERY_DATASET": "test",
+            },
+            clear=True,
+        ),
+        patch("main.extract_pull_requests", side_effect=extract_side_effect),
+    ):
+        result = main.main()
+
+    assert result == 0
+    assert not barrier.broken  # all repos reached the barrier => true concurrency
+    assert mock_load.call_count == num_repos

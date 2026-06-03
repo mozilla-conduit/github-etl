@@ -5,6 +5,7 @@ This script extracts data from GitHub repositories, transforms it,
 and loads it into a BigQuery dataset using chunked processing.
 """
 
+import concurrent.futures
 import logging
 import os
 import re
@@ -836,6 +837,147 @@ def load_data(
         )
 
 
+_DEFAULT_MAX_WORKERS: int = 8
+
+
+def _resolve_max_workers(repo_count: int) -> int:
+    """
+    Decide how many repos to process concurrently.
+
+    Defaults to one worker per repo, capped at ``_DEFAULT_MAX_WORKERS`` to avoid
+    spawning an unbounded number of threads (and GitHub API connections) for large
+    repo lists. The cap is overridable via the ``GITHUB_ETL_MAX_WORKERS`` env var.
+
+    Args:
+        repo_count: Number of repositories to process
+
+    Returns:
+        Worker count, always at least 1.
+    """
+    cap = _DEFAULT_MAX_WORKERS
+    override = os.environ.get("GITHUB_ETL_MAX_WORKERS")
+    if override:
+        try:
+            parsed = int(override)
+            if parsed > 0:
+                cap = parsed
+            else:
+                logger.warning(
+                    f"Ignoring non-positive GITHUB_ETL_MAX_WORKERS={override!r}"
+                )
+        except ValueError:
+            logger.warning(f"Ignoring invalid GITHUB_ETL_MAX_WORKERS={override!r}")
+    return max(1, min(repo_count, cap))
+
+
+def process_repo(
+    repo: str,
+    github_app_id: str | None,
+    github_private_key: str | None,
+    github_api_url: str,
+    bigquery_client: bigquery.Client,
+    bigquery_dataset: str,
+    snapshot_date: str,
+    use_streaming_insert: bool,
+) -> int:
+    """
+    Run the full extract/transform/load pipeline for a single repository.
+
+    This is the unit of work executed per worker thread. It creates its own
+    ``requests.Session`` so that repos processed concurrently never share or
+    clobber each other's ``Authorization`` header (installation tokens are
+    per-repo and the header is rewritten on every refresh).
+
+    Args:
+        repo: Repository in "owner/repo" format
+        github_app_id: GitHub App ID, or None to run unauthenticated
+        github_private_key: RSA private key (PEM), or None to run unauthenticated
+        github_api_url: GitHub API base URL
+        bigquery_client: Shared BigQuery client (thread-safe for queries/loads)
+        bigquery_dataset: BigQuery dataset ID
+        snapshot_date: Snapshot date string in YYYY-MM-DD format
+        use_streaming_insert: Whether to use streaming inserts (emulator only)
+
+    Returns:
+        Number of PRs processed for this repo.
+    """
+    # Each thread gets its own session; requests.Session is not safe to share
+    # across threads and we rewrite the Authorization header per repo.
+    session = requests.Session()
+    session.headers.update(
+        {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "gh-pr-scraper/1.0 (+https://api.github.com)",
+        }
+    )
+
+    # Build a per-repo token refresh callable. It is called by the generator
+    # before each page fetch, so every API request (PRs + commits + reviewers +
+    # comments) uses a valid token. The access_token_cache means this only hits
+    # the GitHub API when the cached token has <60 seconds remaining.
+    refresh_auth: Callable[[], None] | None = None
+    if github_app_id and github_private_key:
+
+        def _refresh() -> None:
+            try:
+                app_jwt = generate_github_jwt(github_app_id, github_private_key)
+                access_token = get_installation_access_token(
+                    app_jwt, repo, github_api_url
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to obtain GitHub App access token for {repo}: {e}. "
+                    "Check that GITHUB_APP_ID is correct and GITHUB_PRIVATE_KEY "
+                    "is a valid PEM-encoded RSA private key."
+                ) from e
+            session.headers["Authorization"] = f"Bearer {access_token}"
+
+        refresh_auth = _refresh
+        # Set the token immediately so the first generator page is authenticated.
+        refresh_auth()
+
+    # Delete any existing rows for this (repo, snapshot_date) before loading.
+    # This makes every run idempotent: if a previous run crashed mid-way and left
+    # partial data, a rerun will clean up the partial write and reload cleanly.
+    if snapshot_exists(bigquery_client, bigquery_dataset, repo, snapshot_date):
+        logger.info(
+            f"Deleting partial/existing snapshot for {repo} on {snapshot_date} before reload"
+        )
+        delete_existing_snapshot(bigquery_client, bigquery_dataset, repo, snapshot_date)
+
+    processed = 0
+    for chunk_count, chunk in enumerate(
+        extract_pull_requests(
+            session,
+            repo,
+            chunk_size=100,
+            github_api_url=github_api_url,
+            refresh_auth=refresh_auth,
+        ),
+        start=1,
+    ):
+        logger.info(f"[{repo}] Processing chunk {chunk_count} with {len(chunk)} PRs")
+
+        # Transform
+        transformed_data = transform_data(chunk, repo)
+
+        # Load
+        load_data(
+            bigquery_client,
+            bigquery_dataset,
+            transformed_data,
+            snapshot_date,
+            use_streaming_insert=use_streaming_insert,
+        )
+
+        processed += len(chunk)
+        logger.info(
+            f"[{repo}] Completed chunk {chunk_count}. PRs processed for repo: {processed}"
+        )
+
+    return processed
+
+
 def main() -> int:
     """
     Main ETL process with chunked processing.
@@ -879,16 +1021,6 @@ def _main() -> int:
     if not bigquery_dataset:
         raise SystemExit("Environment variable BIGQUERY_DATASET is required")
 
-    # Setup GitHub session; the Authorization header is updated before each repo using
-    # an installation access token (which may be cached)
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "gh-pr-scraper/1.0 (+https://api.github.com)",
-        }
-    )
-
     github_api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
     if os.environ.get("GITHUB_API_URL"):
         logger.info(f"Using custom GitHub API URL: {github_api_url}")
@@ -921,83 +1053,42 @@ def _main() -> int:
 
     failed_repos: list[str] = []
 
-    for repo in github_repos:
-        try:
-            # Delete any existing rows for this (repo, snapshot_date) before loading.
-            # This makes every run idempotent: if a previous run crashed mid-way and left
-            # partial data, a rerun will clean up the partial write and reload cleanly.
-            if snapshot_exists(bigquery_client, bigquery_dataset, repo, snapshot_date):
-                logger.info(
-                    f"Deleting partial/existing snapshot for {repo} on {snapshot_date} before reload"
-                )
-                delete_existing_snapshot(
-                    bigquery_client, bigquery_dataset, repo, snapshot_date
-                )
+    # Each repo is independent (its own session, token, and BigQuery rows keyed by
+    # target_repository), so they are processed concurrently. The work is I/O-bound
+    # (GitHub API + BigQuery), so threads — not processes — are the right fit.
+    max_workers = _resolve_max_workers(len(github_repos))
+    logger.info(
+        f"Processing {len(github_repos)} repo(s) with up to {max_workers} worker(s)"
+    )
 
-            # Build a per-repo token refresh callable. It is called by the generator
-            # before each page fetch, so every API request (PRs + commits + reviewers +
-            # comments) uses a valid token. The access_token_cache means this only hits
-            # the GitHub API when the cached token has <60 seconds remaining.
-            refresh_auth: Callable[[], None] | None = None
-            if github_app_id and github_private_key:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_repo = {
+            executor.submit(
+                process_repo,
+                repo,
+                github_app_id,
+                github_private_key,
+                github_api_url,
+                bigquery_client,
+                bigquery_dataset,
+                snapshot_date,
+                bool(emulator_host),
+            ): repo
+            for repo in github_repos
+        }
 
-                def _make_refresh(
-                    _repo: str = repo,
-                ) -> Callable[[], None]:
-                    def _refresh() -> None:
-                        try:
-                            app_jwt = generate_github_jwt(
-                                github_app_id, github_private_key
-                            )
-                            access_token = get_installation_access_token(
-                                app_jwt, _repo, github_api_url
-                            )
-                        except Exception as e:
-                            raise RuntimeError(
-                                f"Failed to obtain GitHub App access token for {_repo}: {e}. "
-                                "Check that GITHUB_APP_ID is correct and GITHUB_PRIVATE_KEY "
-                                "is a valid PEM-encoded RSA private key."
-                            ) from e
-                        session.headers["Authorization"] = f"Bearer {access_token}"
-
-                    return _refresh
-
-                refresh_auth = _make_refresh()
-                # Set the token immediately so the first generator page is authenticated.
-                refresh_auth()
-
-            for chunk_count, chunk in enumerate(
-                extract_pull_requests(
-                    session,
-                    repo,
-                    chunk_size=100,
-                    github_api_url=github_api_url,
-                    refresh_auth=refresh_auth,
-                ),
-                start=1,
-            ):
-                logger.info(f"Processing chunk {chunk_count} with {len(chunk)} PRs")
-
-                # Transform
-                transformed_data = transform_data(chunk, repo)
-
-                # Load
-                load_data(
-                    bigquery_client,
-                    bigquery_dataset,
-                    transformed_data,
-                    snapshot_date,
-                    use_streaming_insert=bool(emulator_host),
-                )
-
-                total_processed += len(chunk)
-                logger.info(
-                    f"Completed chunk {chunk_count}. Total PRs processed: {total_processed}"
-                )
-        except (TooManyRetriesError, RuntimeError) as exc:
-            logger.error(f"Failed to process repo {repo}: {exc}")
-            failed_repos.append(repo)
-            continue
+        for future in concurrent.futures.as_completed(future_to_repo):
+            repo = future_to_repo[future]
+            try:
+                processed = future.result()
+            except (TooManyRetriesError, RuntimeError) as exc:
+                logger.error(f"Failed to process repo {repo}: {exc}")
+                failed_repos.append(repo)
+                continue
+            total_processed += processed
+            logger.info(
+                f"Finished repo {repo}: {processed} PRs. Total so far: {total_processed}"
+            )
 
     if failed_repos:
         logger.error(
