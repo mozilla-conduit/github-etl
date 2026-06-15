@@ -70,17 +70,20 @@ class TokenStore:
     against GitHub's per-installation rate limit. Locks are keyed by installation
     ID so a cache miss (or rate-limit sleep) for one installation never blocks
     token creation for another. The lock is only held on the slow (cache-miss)
-    path; the guard protects the lock map itself.
+    path. Two short-lived guards protect the shared dicts themselves: one for the
+    token cache and one for the lock map.
     """
 
     def __init__(self) -> None:
         self._tokens: dict[int, AccessToken] = {}
+        self._tokens_guard = threading.Lock()
         self._locks: dict[int, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
     def cached_token(self, installation_id: int) -> str | None:
         """Return a still-valid cached token for the installation, or None."""
-        cached = self._tokens.get(installation_id)
+        with self._tokens_guard:
+            cached = self._tokens.get(installation_id)
         if cached is not None and cached.expires_at > datetime.now(
             timezone.utc
         ) + timedelta(seconds=60):
@@ -102,7 +105,8 @@ class TokenStore:
 
     def store(self, installation_id: int, token: AccessToken) -> None:
         """Cache *token* for *installation_id*."""
-        self._tokens[installation_id] = token
+        with self._tokens_guard:
+            self._tokens[installation_id] = token
 
 
 # Module-level token store shared across all worker threads.
@@ -169,87 +173,92 @@ def get_installation_access_token(
         Installation access token string
     """
 
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Authorization": f"Bearer {app_jwt}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-    )
+    # Use a context manager so the temporary session's connection pool is closed
+    # on every return path (cache hits included), rather than leaking sockets as
+    # refresh_auth calls this repeatedly across concurrent repo workers.
+    with requests.Session() as session:
+        session.headers.update(
+            {
+                "Authorization": f"Bearer {app_jwt}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+        )
 
-    installation_id = repo_installation_cache.get(repo)
-    if installation_id is None:
-        resp = session.get(f"{github_api_url}/repos/{repo}/installation")
-        if _is_rate_limited(resp):
-            sleep_for_rate_limit(resp)
+        installation_id = repo_installation_cache.get(repo)
+        if installation_id is None:
             resp = session.get(f"{github_api_url}/repos/{repo}/installation")
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Failed to get GitHub App installation for {repo}: "
-                f"{resp.status_code}: {resp.text}"
-            )
-        try:
-            installation_id = resp.json()["id"]
-        except (requests.exceptions.JSONDecodeError, KeyError) as e:
-            raise RuntimeError(
-                f"Failed to parse installation response for {repo}: {e}: {resp.text}"
-            )
-        repo_installation_cache[repo] = installation_id
+            if _is_rate_limited(resp):
+                sleep_for_rate_limit(resp)
+                resp = session.get(f"{github_api_url}/repos/{repo}/installation")
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"Failed to get GitHub App installation for {repo}: "
+                    f"{resp.status_code}: {resp.text}"
+                )
+            try:
+                installation_id = resp.json()["id"]
+            except (requests.exceptions.JSONDecodeError, KeyError) as e:
+                raise RuntimeError(
+                    f"Failed to parse installation response for {repo}: {e}: {resp.text}"
+                )
+            repo_installation_cache[repo] = installation_id
 
-    # Fast path: serve a still-valid cached token without taking the lock.
-    token = token_store.cached_token(installation_id)
-    if token is not None:
-        return token
-
-    # Slow path: serialize creation so concurrent workers sharing an installation
-    # don't each POST /access_tokens. The lock is specific to this installation,
-    # so a rate-limit sleep here never blocks workers on other installations.
-    # Re-check the cache once the lock is held in case another thread populated it
-    # while we waited.
-    with token_store.lock_for(installation_id):
+        # Fast path: serve a still-valid cached token without taking the lock.
         token = token_store.cached_token(installation_id)
         if token is not None:
             return token
 
-        logger.info(
-            f"Fetching new GitHub App installation access token for installation {installation_id}"
-        )
-        resp = session.post(
-            f"{github_api_url}/app/installations/{installation_id}/access_tokens",
-        )
-        if _is_rate_limited(resp):
-            sleep_for_rate_limit(resp)
+        # Slow path: serialize creation so concurrent workers sharing an installation
+        # don't each POST /access_tokens. The lock is specific to this installation,
+        # so a rate-limit sleep here never blocks workers on other installations.
+        # Re-check the cache once the lock is held in case another thread populated it
+        # while we waited.
+        with token_store.lock_for(installation_id):
+            token = token_store.cached_token(installation_id)
+            if token is not None:
+                return token
+
+            logger.info(
+                f"Fetching new GitHub App installation access token for installation {installation_id}"
+            )
             resp = session.post(
                 f"{github_api_url}/app/installations/{installation_id}/access_tokens",
             )
-        if resp.status_code != 201:
-            raise RuntimeError(
-                f"Failed to get installation access token: {resp.status_code}: {resp.text}"
-            )
+            if _is_rate_limited(resp):
+                sleep_for_rate_limit(resp)
+                resp = session.post(
+                    f"{github_api_url}/app/installations/{installation_id}/access_tokens",
+                )
+            if resp.status_code != 201:
+                raise RuntimeError(
+                    f"Failed to get installation access token: {resp.status_code}: {resp.text}"
+                )
 
-        try:
-            data = resp.json()
-        except requests.exceptions.JSONDecodeError as e:
-            raise RuntimeError(
-                f"Failed to parse access token response: {e}: {resp.text}"
+            try:
+                data = resp.json()
+            except requests.exceptions.JSONDecodeError as e:
+                raise RuntimeError(
+                    f"Failed to parse access token response: {e}: {resp.text}"
+                )
+            try:
+                access_token = AccessToken(
+                    token=data["token"],
+                    expires_at=datetime.fromisoformat(data["expires_at"]),
+                )
+            except KeyError as e:
+                raise RuntimeError(
+                    f"Unexpected access token response structure, missing key {e}: {resp.text}"
+                )
+            except ValueError as e:
+                raise RuntimeError(
+                    f"Invalid expires_at format in access token response: {e}"
+                )
+            token_store.store(installation_id, access_token)
+            logger.info(
+                f"Obtained new access token, expires at {access_token.expires_at}"
             )
-        try:
-            access_token = AccessToken(
-                token=data["token"],
-                expires_at=datetime.fromisoformat(data["expires_at"]),
-            )
-        except KeyError as e:
-            raise RuntimeError(
-                f"Unexpected access token response structure, missing key {e}: {resp.text}"
-            )
-        except ValueError as e:
-            raise RuntimeError(
-                f"Invalid expires_at format in access token response: {e}"
-            )
-        token_store.store(installation_id, access_token)
-        logger.info(f"Obtained new access token, expires at {access_token.expires_at}")
-        return access_token.token
+            return access_token.token
 
 
 def setup_logging() -> None:
@@ -952,6 +961,37 @@ def _resolve_max_workers(repo_count: int) -> int:
     return max(1, min(repo_count, cap))
 
 
+def _make_refresh_auth(
+    session: requests.Session,
+    repo: str,
+    github_app_id: str,
+    github_private_key: str,
+    github_api_url: str,
+) -> Callable[[], None]:
+    """
+    Build a callable that refreshes *session*'s Authorization header for *repo*.
+
+    The returned callable is invoked by the extraction generator before each page
+    fetch, so every API request (PRs + commits + reviewers + comments) uses a
+    valid token. The token_store cache means it only hits the GitHub API when the
+    cached token has <60 seconds remaining.
+    """
+
+    def refresh_auth() -> None:
+        try:
+            app_jwt = generate_github_jwt(github_app_id, github_private_key)
+            access_token = get_installation_access_token(app_jwt, repo, github_api_url)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to obtain GitHub App access token for {repo}: {e}. "
+                "Check that GITHUB_APP_ID is correct and GITHUB_PRIVATE_KEY "
+                "is a valid PEM-encoded RSA private key."
+            ) from e
+        session.headers["Authorization"] = f"Bearer {access_token}"
+
+    return refresh_auth
+
+
 def process_repo(
     repo: str,
     github_app_id: str | None,
@@ -987,27 +1027,16 @@ def process_repo(
     # across threads and we rewrite the Authorization header per repo.
     session = _build_session()
 
-    # Build a per-repo token refresh callable. It is called by the generator
-    # before each page fetch, so every API request (PRs + commits + reviewers +
-    # comments) uses a valid token. The token_store cache means this only hits
-    # the GitHub API when the cached token has <60 seconds remaining.
-    refresh_auth: Callable[[], None] | None = None
-    if github_app_id and github_private_key:
-
-        def refresh_auth() -> None:
-            try:
-                app_jwt = generate_github_jwt(github_app_id, github_private_key)
-                access_token = get_installation_access_token(
-                    app_jwt, repo, github_api_url
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to obtain GitHub App access token for {repo}: {e}. "
-                    "Check that GITHUB_APP_ID is correct and GITHUB_PRIVATE_KEY "
-                    "is a valid PEM-encoded RSA private key."
-                ) from e
-            session.headers["Authorization"] = f"Bearer {access_token}"
-
+    # Build a per-repo token refresh callable when running authenticated. Bound
+    # once here (no None-then-redeclare) so the name has a single, clear type.
+    refresh_auth = (
+        _make_refresh_auth(
+            session, repo, github_app_id, github_private_key, github_api_url
+        )
+        if github_app_id and github_private_key
+        else None
+    )
+    if refresh_auth is not None:
         # Set the token immediately so the first generator page is authenticated.
         refresh_auth()
 
