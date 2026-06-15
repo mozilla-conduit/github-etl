@@ -56,27 +56,70 @@ class AccessToken:
     expires_at: datetime
 
 
-access_token_cache: dict[int, AccessToken] = {}
 repo_installation_cache: dict[str, int] = {}
 
-# Serializes installation-token creation per installation. Without it, all workers
-# sharing an installation miss the cache on startup and each POST /access_tokens,
-# producing redundant token creations and a burst against GitHub's per-installation
-# rate limit. Locks are keyed by installation ID so a cache miss (or rate-limit
-# sleep) for one installation never blocks token creation for another. A lock is
-# only held on the slow (cache-miss) path. The guard protects the map itself.
-_token_locks: dict[int, threading.Lock] = {}
-_token_locks_guard = threading.Lock()
+
+class TokenStore:
+    """
+    Thread-safe cache of GitHub App installation access tokens.
+
+    Tokens are cached per installation ID and reused until they are within 60
+    seconds of expiry. Token creation is serialized per installation via a lock so
+    that concurrent workers sharing an installation don't each POST
+    /access_tokens, which would produce redundant token creations and a burst
+    against GitHub's per-installation rate limit. Locks are keyed by installation
+    ID so a cache miss (or rate-limit sleep) for one installation never blocks
+    token creation for another. The lock is only held on the slow (cache-miss)
+    path; the guard protects the lock map itself.
+    """
+
+    def __init__(self) -> None:
+        self._tokens: dict[int, AccessToken] = {}
+        self._locks: dict[int, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def cached_token(self, installation_id: int) -> str | None:
+        """Return a still-valid cached token for the installation, or None."""
+        cached = self._tokens.get(installation_id)
+        if cached is not None and cached.expires_at > datetime.now(
+            timezone.utc
+        ) + timedelta(seconds=60):
+            logger.info(
+                f"Reusing cached access token for installation {installation_id}, "
+                f"expires at {cached.expires_at}"
+            )
+            return cached.token
+        return None
+
+    def lock_for(self, installation_id: int) -> threading.Lock:
+        """Return the (lazily created) token-creation lock for an installation."""
+        with self._locks_guard:
+            lock = self._locks.get(installation_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[installation_id] = lock
+            return lock
+
+    def store(self, installation_id: int, token: AccessToken) -> None:
+        """Cache *token* for *installation_id*."""
+        self._tokens[installation_id] = token
 
 
-def _lock_for_installation(installation_id: int) -> threading.Lock:
-    """Return the (lazily created) token-creation lock for an installation."""
-    with _token_locks_guard:
-        lock = _token_locks.get(installation_id)
-        if lock is None:
-            lock = threading.Lock()
-            _token_locks[installation_id] = lock
-        return lock
+# Module-level token store shared across all worker threads.
+token_store = TokenStore()
+
+
+def _is_rate_limited(resp: requests.Response) -> bool:
+    """
+    Return True when *resp* indicates an exhausted primary rate limit.
+
+    GitHub signals a hit primary rate limit with either 403 or 429 plus
+    ``X-RateLimit-Remaining: 0``. Both status codes are treated identically.
+    """
+    return (
+        resp.status_code in (403, 429)
+        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
+    )
 
 
 def generate_github_jwt(app_id: str, private_key_pem: str) -> str:
@@ -138,10 +181,7 @@ def get_installation_access_token(
     installation_id = repo_installation_cache.get(repo)
     if installation_id is None:
         resp = session.get(f"{github_api_url}/repos/{repo}/installation")
-        if (
-            resp.status_code == 403
-            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-        ):
+        if _is_rate_limited(resp):
             sleep_for_rate_limit(resp)
             resp = session.get(f"{github_api_url}/repos/{repo}/installation")
         if resp.status_code != 200:
@@ -157,20 +197,8 @@ def get_installation_access_token(
             )
         repo_installation_cache[repo] = installation_id
 
-    def _cached_token() -> str | None:
-        cached = access_token_cache.get(installation_id)
-        if cached is not None and cached.expires_at > datetime.now(
-            timezone.utc
-        ) + timedelta(seconds=60):
-            logger.info(
-                f"Reusing cached access token for installation {installation_id}, "
-                f"expires at {cached.expires_at}"
-            )
-            return cached.token
-        return None
-
     # Fast path: serve a still-valid cached token without taking the lock.
-    token = _cached_token()
+    token = token_store.cached_token(installation_id)
     if token is not None:
         return token
 
@@ -179,8 +207,8 @@ def get_installation_access_token(
     # so a rate-limit sleep here never blocks workers on other installations.
     # Re-check the cache once the lock is held in case another thread populated it
     # while we waited.
-    with _lock_for_installation(installation_id):
-        token = _cached_token()
+    with token_store.lock_for(installation_id):
+        token = token_store.cached_token(installation_id)
         if token is not None:
             return token
 
@@ -190,10 +218,7 @@ def get_installation_access_token(
         resp = session.post(
             f"{github_api_url}/app/installations/{installation_id}/access_tokens",
         )
-        if (
-            resp.status_code == 403
-            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-        ):
+        if _is_rate_limited(resp):
             sleep_for_rate_limit(resp)
             resp = session.post(
                 f"{github_api_url}/app/installations/{installation_id}/access_tokens",
@@ -222,7 +247,7 @@ def get_installation_access_token(
             raise RuntimeError(
                 f"Invalid expires_at format in access token response: {e}"
             )
-        access_token_cache[installation_id] = access_token
+        token_store.store(installation_id, access_token)
         logger.info(f"Obtained new access token, expires at {access_token.expires_at}")
         return access_token.token
 
@@ -519,10 +544,7 @@ def github_get(
         if resp.status_code == 200:
             return resp
 
-        if (
-            resp.status_code in (403, 429)
-            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-        ):
+        if _is_rate_limited(resp):
             sleep_for_rate_limit(resp)
             continue
 
@@ -882,6 +904,24 @@ def load_data(
         )
 
 
+def _build_session() -> requests.Session:
+    """
+    Create a ``requests.Session`` with the default GitHub API headers.
+
+    Each worker thread gets its own session because ``requests.Session`` is not
+    safe to share across threads and the per-repo ``Authorization`` header is
+    rewritten on token refresh.
+    """
+    session = requests.Session()
+    session.headers.update(
+        {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "gh-pr-scraper/1.0 (+https://api.github.com)",
+        }
+    )
+    return session
+
+
 def _resolve_max_workers(repo_count: int) -> int:
     """
     Decide how many repos to process concurrently.
@@ -945,22 +985,16 @@ def process_repo(
     """
     # Each thread gets its own session; requests.Session is not safe to share
     # across threads and we rewrite the Authorization header per repo.
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "gh-pr-scraper/1.0 (+https://api.github.com)",
-        }
-    )
+    session = _build_session()
 
     # Build a per-repo token refresh callable. It is called by the generator
     # before each page fetch, so every API request (PRs + commits + reviewers +
-    # comments) uses a valid token. The access_token_cache means this only hits
+    # comments) uses a valid token. The token_store cache means this only hits
     # the GitHub API when the cached token has <60 seconds remaining.
     refresh_auth: Callable[[], None] | None = None
     if github_app_id and github_private_key:
 
-        def _refresh() -> None:
+        def refresh_auth() -> None:
             try:
                 app_jwt = generate_github_jwt(github_app_id, github_private_key)
                 access_token = get_installation_access_token(
@@ -974,7 +1008,6 @@ def process_repo(
                 ) from e
             session.headers["Authorization"] = f"Bearer {access_token}"
 
-        refresh_auth = _refresh
         # Set the token immediately so the first generator page is authenticated.
         refresh_auth()
 
