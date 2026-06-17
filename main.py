@@ -12,6 +12,7 @@ import re
 import sys
 import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterator
@@ -77,7 +78,7 @@ class TokenStore:
     def __init__(self) -> None:
         self._tokens: dict[int, AccessToken] = {}
         self._tokens_guard = threading.Lock()
-        self._locks: dict[int, threading.Lock] = {}
+        self._locks: defaultdict[int, threading.Lock] = defaultdict(threading.Lock)
         self._locks_guard = threading.Lock()
 
     def cached_token(self, installation_id: int) -> str | None:
@@ -97,11 +98,7 @@ class TokenStore:
     def lock_for(self, installation_id: int) -> threading.Lock:
         """Return the (lazily created) token-creation lock for an installation."""
         with self._locks_guard:
-            lock = self._locks.get(installation_id)
-            if lock is None:
-                lock = threading.Lock()
-                self._locks[installation_id] = lock
-            return lock
+            return self._locks[installation_id]
 
     def store(self, installation_id: int, token: AccessToken) -> None:
         """Cache *token* for *installation_id*."""
@@ -115,15 +112,23 @@ token_store = TokenStore()
 
 def _is_rate_limited(resp: requests.Response) -> bool:
     """
-    Return True when *resp* indicates an exhausted primary rate limit.
+    Return True when *resp* indicates an exhausted rate limit.
 
-    GitHub signals a hit primary rate limit with either 403 or 429 plus
-    ``X-RateLimit-Remaining: 0``. Both status codes are treated identically.
+    GitHub uses 403 or 429 for two distinct rate limits, both handled here:
+
+    - **Primary**: signaled by ``X-RateLimit-Remaining: 0`` (with a
+      ``X-RateLimit-Reset`` epoch telling us when it replenishes).
+    - **Secondary** (abuse detection): signaled by a ``Retry-After`` header,
+      and frequently *without* ``X-RateLimit-Remaining: 0``.
+
+    A 403/429 carrying neither signal (e.g. a genuine permission error) is
+    deliberately not treated as rate-limited.
     """
-    return (
-        resp.status_code in (403, 429)
-        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-    )
+    if resp.status_code not in (403, 429):
+        return False
+    if int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0:
+        return True
+    return "Retry-After" in resp.headers
 
 
 def generate_github_jwt(app_id: str, private_key_pem: str) -> str:
@@ -176,26 +181,21 @@ def get_installation_access_token(
     # Use a context manager so the temporary session's connection pool is closed
     # on every return path (cache hits included), rather than leaking sockets as
     # refresh_auth calls this repeatedly across concurrent repo workers.
-    with requests.Session() as session:
+    with _build_session() as session:
         session.headers.update(
             {
                 "Authorization": f"Bearer {app_jwt}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
             }
         )
 
         installation_id = repo_installation_cache.get(repo)
         if installation_id is None:
-            resp = session.get(f"{github_api_url}/repos/{repo}/installation")
-            if _is_rate_limited(resp):
-                sleep_for_rate_limit(resp)
-                resp = session.get(f"{github_api_url}/repos/{repo}/installation")
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"Failed to get GitHub App installation for {repo}: "
-                    f"{resp.status_code}: {resp.text}"
-                )
+            # No refresh_auth: this request authenticates with the app JWT, so a 401
+            # means the JWT itself is bad and refreshing an installation token would
+            # not help (and would recurse back into this function).
+            resp = github_request(
+                session, "GET", f"{github_api_url}/repos/{repo}/installation"
+            )
             try:
                 installation_id = resp.json()["id"]
             except (requests.exceptions.JSONDecodeError, KeyError) as e:
@@ -222,18 +222,12 @@ def get_installation_access_token(
             logger.info(
                 f"Fetching new GitHub App installation access token for installation {installation_id}"
             )
-            resp = session.post(
+            resp = github_request(
+                session,
+                "POST",
                 f"{github_api_url}/app/installations/{installation_id}/access_tokens",
+                expected_status=201,
             )
-            if _is_rate_limited(resp):
-                sleep_for_rate_limit(resp)
-                resp = session.post(
-                    f"{github_api_url}/app/installations/{installation_id}/access_tokens",
-                )
-            if resp.status_code != 201:
-                raise RuntimeError(
-                    f"Failed to get installation access token: {resp.status_code}: {resp.text}"
-                )
 
             try:
                 data = resp.json()
@@ -479,11 +473,29 @@ def extract_comments(
 
 
 def sleep_for_rate_limit(resp: requests.Response) -> None:
-    """Sleep until rate limit resets."""
+    """Sleep until the rate limit resets.
+
+    Handles both the primary limit (``X-RateLimit-Remaining: 0`` plus an
+    ``X-RateLimit-Reset`` epoch) and the secondary/abuse limit (a
+    ``Retry-After`` header giving a delay in seconds). When both are present
+    the longer wait wins.
+    """
+    sleep_time = 0
     remaining = int(resp.headers.get("X-RateLimit-Remaining", 1))
     reset = int(resp.headers.get("X-RateLimit-Reset", 0))
     if remaining == 0:
-        sleep_time = max(0, reset - int(time.time()))
+        sleep_time = max(sleep_time, reset - int(time.time()))
+
+    retry_after = resp.headers.get("Retry-After")
+    if retry_after is not None:
+        try:
+            sleep_time = max(sleep_time, int(retry_after))
+        except ValueError:
+            # Retry-After may be an HTTP-date; ignore and fall back to reset.
+            pass
+
+    sleep_time = max(0, sleep_time)
+    if sleep_time > 0:
         print(
             f"Rate limit exceeded. Sleeping for {sleep_time} seconds.", file=sys.stderr
         )
@@ -496,14 +508,17 @@ def _is_html_error_page(resp: requests.Response) -> bool:
     return "application/json" not in content_type and resp.status_code >= 400
 
 
-def github_get(
+def github_request(
     session: requests.Session,
+    method: str,
     url: str,
+    *,
     params: dict | None = None,
     refresh_auth: Callable[[], None] | None = None,
+    expected_status: int = 200,
 ) -> requests.Response:
     """
-    Make a GitHub API GET request, retrying on transient errors and expired tokens.
+    Make a GitHub API request, retrying on transient errors and expired tokens.
 
     Retry behaviour:
     - 403 rate-limit: sleeps until reset, then retries (unbounded, existing behaviour).
@@ -533,7 +548,9 @@ def github_get(
 
     while True:
         try:
-            resp = session.get(url, params=params, timeout=_REQUEST_TIMEOUT)
+            resp = getattr(session, method.lower())(
+                url, params=params, timeout=_REQUEST_TIMEOUT
+            )
         except (
             requests.exceptions.Timeout,
             requests.exceptions.ConnectionError,
@@ -550,7 +567,7 @@ def github_get(
                 f"GitHub API request failed after retries for {url}: {exc}"
             )
 
-        if resp.status_code == 200:
+        if resp.status_code == expected_status:
             return resp
 
         if _is_rate_limited(resp):
@@ -591,6 +608,16 @@ def github_get(
         raise TooManyRetriesError(
             f"GitHub API error {resp.status_code} for {url}: {resp.text or 'No response text'}"
         )
+
+
+def github_get(
+    session: requests.Session,
+    url: str,
+    params: dict | None = None,
+    refresh_auth: Callable[[], None] | None = None,
+) -> requests.Response:
+    """Convenience wrapper around :func:`github_request` for GET requests."""
+    return github_request(session, "GET", url, params=params, refresh_auth=refresh_auth)
 
 
 def transform_data(raw_data: list[dict], repo: str) -> dict:
@@ -926,6 +953,7 @@ def _build_session() -> requests.Session:
         {
             "Accept": "application/vnd.github+json",
             "User-Agent": "gh-pr-scraper/1.0 (+https://api.github.com)",
+            "X-GitHub-Api-Version": "2022-11-28",
         }
     )
     return session
