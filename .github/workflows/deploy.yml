@@ -6,6 +6,7 @@ on:
       - main
     tags:
       - release-20[0-9][0-9][01][0-9][0-3][0-9].[0-9]  # e.g. release-20231204.2
+  workflow_dispatch: {}
 
 jobs:
   build:
