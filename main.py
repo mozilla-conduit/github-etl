@@ -5,11 +5,14 @@ This script extracts data from GitHub repositories, transforms it,
 and loads it into a BigQuery dataset using chunked processing.
 """
 
+import concurrent.futures
 import logging
 import os
 import re
 import sys
+import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterator
@@ -34,6 +37,9 @@ _RETRY_MULTIPLIER: float = 2.0
 _MAX_AUTH_RETRIES: int = 2
 _REQUEST_TIMEOUT: float = 30.0
 
+# Default ceiling on concurrent repo workers (overridable via GITHUB_ETL_MAX_WORKERS).
+_DEFAULT_MAX_WORKERS: int = 8
+
 
 class TooManyRetriesError(Exception):
     """Raised when all retry attempts for a GitHub API request are exhausted."""
@@ -51,8 +57,78 @@ class AccessToken:
     expires_at: datetime
 
 
-access_token_cache: dict[int, AccessToken] = {}
 repo_installation_cache: dict[str, int] = {}
+
+
+class TokenStore:
+    """
+    Thread-safe cache of GitHub App installation access tokens.
+
+    Tokens are cached per installation ID and reused until they are within 60
+    seconds of expiry. Token creation is serialized per installation via a lock so
+    that concurrent workers sharing an installation don't each POST
+    /access_tokens, which would produce redundant token creations and a burst
+    against GitHub's per-installation rate limit. Locks are keyed by installation
+    ID so a cache miss (or rate-limit sleep) for one installation never blocks
+    token creation for another. The lock is only held on the slow (cache-miss)
+    path. Two short-lived guards protect the shared dicts themselves: one for the
+    token cache and one for the lock map.
+    """
+
+    def __init__(self) -> None:
+        self._tokens: dict[int, AccessToken] = {}
+        self._tokens_guard = threading.Lock()
+        self._locks: defaultdict[int, threading.Lock] = defaultdict(threading.Lock)
+        self._locks_guard = threading.Lock()
+
+    def cached_token(self, installation_id: int) -> str | None:
+        """Return a still-valid cached token for the installation, or None."""
+        with self._tokens_guard:
+            cached = self._tokens.get(installation_id)
+        if cached is not None and cached.expires_at > datetime.now(
+            timezone.utc
+        ) + timedelta(seconds=60):
+            logger.info(
+                f"Reusing cached access token for installation {installation_id}, "
+                f"expires at {cached.expires_at}"
+            )
+            return cached.token
+        return None
+
+    def lock_for(self, installation_id: int) -> threading.Lock:
+        """Return the (lazily created) token-creation lock for an installation."""
+        with self._locks_guard:
+            return self._locks[installation_id]
+
+    def store(self, installation_id: int, token: AccessToken) -> None:
+        """Cache *token* for *installation_id*."""
+        with self._tokens_guard:
+            self._tokens[installation_id] = token
+
+
+# Module-level token store shared across all worker threads.
+token_store = TokenStore()
+
+
+def _is_rate_limited(resp: requests.Response) -> bool:
+    """
+    Return True when *resp* indicates an exhausted rate limit.
+
+    GitHub uses 403 or 429 for two distinct rate limits, both handled here:
+
+    - **Primary**: signaled by ``X-RateLimit-Remaining: 0`` (with a
+      ``X-RateLimit-Reset`` epoch telling us when it replenishes).
+    - **Secondary** (abuse detection): signaled by a ``Retry-After`` header,
+      and frequently *without* ``X-RateLimit-Remaining: 0``.
+
+    A 403/429 carrying neither signal (e.g. a genuine permission error) is
+    deliberately not treated as rate-limited.
+    """
+    if resp.status_code not in (403, 429):
+        return False
+    if int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0:
+        return True
+    return "Retry-After" in resp.headers
 
 
 def generate_github_jwt(app_id: str, private_key_pem: str) -> str:
@@ -102,83 +178,81 @@ def get_installation_access_token(
         Installation access token string
     """
 
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Authorization": f"Bearer {app_jwt}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-    )
+    # Use a context manager so the temporary session's connection pool is closed
+    # on every return path (cache hits included), rather than leaking sockets as
+    # refresh_auth calls this repeatedly across concurrent repo workers.
+    with _build_session() as session:
+        session.headers.update(
+            {
+                "Authorization": f"Bearer {app_jwt}",
+            }
+        )
 
-    installation_id = repo_installation_cache.get(repo)
-    if installation_id is None:
-        resp = session.get(f"{github_api_url}/repos/{repo}/installation")
-        if (
-            resp.status_code == 403
-            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-        ):
-            sleep_for_rate_limit(resp)
-            resp = session.get(f"{github_api_url}/repos/{repo}/installation")
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Failed to get GitHub App installation for {repo}: "
-                f"{resp.status_code}: {resp.text}"
+        installation_id = repo_installation_cache.get(repo)
+        if installation_id is None:
+            # No refresh_auth: this request authenticates with the app JWT, so a 401
+            # means the JWT itself is bad and refreshing an installation token would
+            # not help (and would recurse back into this function).
+            resp = github_request(
+                session, "GET", f"{github_api_url}/repos/{repo}/installation"
             )
-        try:
-            installation_id = resp.json()["id"]
-        except (requests.exceptions.JSONDecodeError, KeyError) as e:
-            raise RuntimeError(
-                f"Failed to parse installation response for {repo}: {e}: {resp.text}"
+            try:
+                installation_id = resp.json()["id"]
+            except (requests.exceptions.JSONDecodeError, KeyError) as e:
+                raise RuntimeError(
+                    f"Failed to parse installation response for {repo}: {e}: {resp.text}"
+                )
+            repo_installation_cache[repo] = installation_id
+
+        # Fast path: serve a still-valid cached token without taking the lock.
+        token = token_store.cached_token(installation_id)
+        if token is not None:
+            return token
+
+        # Slow path: serialize creation so concurrent workers sharing an installation
+        # don't each POST /access_tokens. The lock is specific to this installation,
+        # so a rate-limit sleep here never blocks workers on other installations.
+        # Re-check the cache once the lock is held in case another thread populated it
+        # while we waited.
+        with token_store.lock_for(installation_id):
+            token = token_store.cached_token(installation_id)
+            if token is not None:
+                return token
+
+            logger.info(
+                f"Fetching new GitHub App installation access token for installation {installation_id}"
             )
-        repo_installation_cache[repo] = installation_id
+            resp = github_request(
+                session,
+                "POST",
+                f"{github_api_url}/app/installations/{installation_id}/access_tokens",
+                expected_status=201,
+            )
 
-    now = datetime.now(timezone.utc)
-    cached = access_token_cache.get(installation_id)
-    if cached is not None and cached.expires_at > now + timedelta(seconds=60):
-        logger.info(
-            f"Reusing cached access token for installation {installation_id}, "
-            f"expires at {cached.expires_at}"
-        )
-        return cached.token
-
-    logger.info(
-        f"Fetching new GitHub App installation access token for installation {installation_id}"
-    )
-    resp = session.post(
-        f"{github_api_url}/app/installations/{installation_id}/access_tokens",
-    )
-    if (
-        resp.status_code == 403
-        and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-    ):
-        sleep_for_rate_limit(resp)
-        resp = session.post(
-            f"{github_api_url}/app/installations/{installation_id}/access_tokens",
-        )
-    if resp.status_code != 201:
-        raise RuntimeError(
-            f"Failed to get installation access token: {resp.status_code}: {resp.text}"
-        )
-
-    try:
-        data = resp.json()
-    except requests.exceptions.JSONDecodeError as e:
-        raise RuntimeError(f"Failed to parse access token response: {e}: {resp.text}")
-    try:
-        access_token = AccessToken(
-            token=data["token"],
-            expires_at=datetime.fromisoformat(data["expires_at"]),
-        )
-    except KeyError as e:
-        raise RuntimeError(
-            f"Unexpected access token response structure, missing key {e}: {resp.text}"
-        )
-    except ValueError as e:
-        raise RuntimeError(f"Invalid expires_at format in access token response: {e}")
-    access_token_cache[installation_id] = access_token
-    logger.info(f"Obtained new access token, expires at {access_token.expires_at}")
-    return access_token.token
+            try:
+                data = resp.json()
+            except requests.exceptions.JSONDecodeError as e:
+                raise RuntimeError(
+                    f"Failed to parse access token response: {e}: {resp.text}"
+                )
+            try:
+                access_token = AccessToken(
+                    token=data["token"],
+                    expires_at=datetime.fromisoformat(data["expires_at"]),
+                )
+            except KeyError as e:
+                raise RuntimeError(
+                    f"Unexpected access token response structure, missing key {e}: {resp.text}"
+                )
+            except ValueError as e:
+                raise RuntimeError(
+                    f"Invalid expires_at format in access token response: {e}"
+                )
+            token_store.store(installation_id, access_token)
+            logger.info(
+                f"Obtained new access token, expires at {access_token.expires_at}"
+            )
+            return access_token.token
 
 
 def setup_logging() -> None:
@@ -399,11 +473,29 @@ def extract_comments(
 
 
 def sleep_for_rate_limit(resp: requests.Response) -> None:
-    """Sleep until rate limit resets."""
+    """Sleep until the rate limit resets.
+
+    Handles both the primary limit (``X-RateLimit-Remaining: 0`` plus an
+    ``X-RateLimit-Reset`` epoch) and the secondary/abuse limit (a
+    ``Retry-After`` header giving a delay in seconds). When both are present
+    the longer wait wins.
+    """
+    sleep_time = 0
     remaining = int(resp.headers.get("X-RateLimit-Remaining", 1))
     reset = int(resp.headers.get("X-RateLimit-Reset", 0))
     if remaining == 0:
-        sleep_time = max(0, reset - int(time.time()))
+        sleep_time = max(sleep_time, reset - int(time.time()))
+
+    retry_after = resp.headers.get("Retry-After")
+    if retry_after is not None:
+        try:
+            sleep_time = max(sleep_time, int(retry_after))
+        except ValueError:
+            # Retry-After may be an HTTP-date; ignore and fall back to reset.
+            pass
+
+    sleep_time = max(0, sleep_time)
+    if sleep_time > 0:
         print(
             f"Rate limit exceeded. Sleeping for {sleep_time} seconds.", file=sys.stderr
         )
@@ -416,14 +508,17 @@ def _is_html_error_page(resp: requests.Response) -> bool:
     return "application/json" not in content_type and resp.status_code >= 400
 
 
-def github_get(
+def github_request(
     session: requests.Session,
+    method: str,
     url: str,
+    *,
     params: dict | None = None,
     refresh_auth: Callable[[], None] | None = None,
+    expected_status: int = 200,
 ) -> requests.Response:
     """
-    Make a GitHub API GET request, retrying on transient errors and expired tokens.
+    Make a GitHub API request, retrying on transient errors and expired tokens.
 
     Retry behaviour:
     - 403 rate-limit: sleeps until reset, then retries (unbounded, existing behaviour).
@@ -453,7 +548,9 @@ def github_get(
 
     while True:
         try:
-            resp = session.get(url, params=params, timeout=_REQUEST_TIMEOUT)
+            resp = getattr(session, method.lower())(
+                url, params=params, timeout=_REQUEST_TIMEOUT
+            )
         except (
             requests.exceptions.Timeout,
             requests.exceptions.ConnectionError,
@@ -470,13 +567,10 @@ def github_get(
                 f"GitHub API request failed after retries for {url}: {exc}"
             )
 
-        if resp.status_code == 200:
+        if resp.status_code == expected_status:
             return resp
 
-        if (
-            resp.status_code in (403, 429)
-            and int(resp.headers.get("X-RateLimit-Remaining", "1")) == 0
-        ):
+        if _is_rate_limited(resp):
             sleep_for_rate_limit(resp)
             continue
 
@@ -514,6 +608,16 @@ def github_get(
         raise TooManyRetriesError(
             f"GitHub API error {resp.status_code} for {url}: {resp.text or 'No response text'}"
         )
+
+
+def github_get(
+    session: requests.Session,
+    url: str,
+    params: dict | None = None,
+    refresh_auth: Callable[[], None] | None = None,
+) -> requests.Response:
+    """Convenience wrapper around :func:`github_request` for GET requests."""
+    return github_request(session, "GET", url, params=params, refresh_auth=refresh_auth)
 
 
 def transform_data(raw_data: list[dict], repo: str) -> dict:
@@ -836,6 +940,176 @@ def load_data(
         )
 
 
+def _build_session() -> requests.Session:
+    """
+    Create a ``requests.Session`` with the default GitHub API headers.
+
+    Each worker thread gets its own session because ``requests.Session`` is not
+    safe to share across threads and the per-repo ``Authorization`` header is
+    rewritten on token refresh.
+    """
+    session = requests.Session()
+    session.headers.update(
+        {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "gh-pr-scraper/1.0 (+https://api.github.com)",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+    )
+    return session
+
+
+def _resolve_max_workers(repo_count: int) -> int:
+    """
+    Decide how many repos to process concurrently.
+
+    Defaults to one worker per repo, capped at ``_DEFAULT_MAX_WORKERS`` to avoid
+    spawning an unbounded number of threads (and GitHub API connections) for large
+    repo lists. The cap is overridable via the ``GITHUB_ETL_MAX_WORKERS`` env var.
+
+    Args:
+        repo_count: Number of repositories to process
+
+    Returns:
+        Worker count, always at least 1.
+    """
+    cap = _DEFAULT_MAX_WORKERS
+    override = os.environ.get("GITHUB_ETL_MAX_WORKERS")
+    if override:
+        try:
+            parsed = int(override)
+            if parsed > 0:
+                cap = parsed
+            else:
+                logger.warning(
+                    f"Ignoring non-positive GITHUB_ETL_MAX_WORKERS={override!r}"
+                )
+        except ValueError:
+            logger.warning(f"Ignoring invalid GITHUB_ETL_MAX_WORKERS={override!r}")
+    return max(1, min(repo_count, cap))
+
+
+def _make_refresh_auth(
+    session: requests.Session,
+    repo: str,
+    github_app_id: str,
+    github_private_key: str,
+    github_api_url: str,
+) -> Callable[[], None]:
+    """
+    Build a callable that refreshes *session*'s Authorization header for *repo*.
+
+    The returned callable is invoked by the extraction generator before each page
+    fetch, so every API request (PRs + commits + reviewers + comments) uses a
+    valid token. The token_store cache means it only hits the GitHub API when the
+    cached token has <60 seconds remaining.
+    """
+
+    def refresh_auth() -> None:
+        try:
+            app_jwt = generate_github_jwt(github_app_id, github_private_key)
+            access_token = get_installation_access_token(app_jwt, repo, github_api_url)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to obtain GitHub App access token for {repo}: {e}. "
+                "Check that GITHUB_APP_ID is correct and GITHUB_PRIVATE_KEY "
+                "is a valid PEM-encoded RSA private key."
+            ) from e
+        session.headers["Authorization"] = f"Bearer {access_token}"
+
+    return refresh_auth
+
+
+def process_repo(
+    repo: str,
+    github_app_id: str | None,
+    github_private_key: str | None,
+    github_api_url: str,
+    bigquery_client: bigquery.Client,
+    bigquery_dataset: str,
+    snapshot_date: str,
+    use_streaming_insert: bool,
+) -> int:
+    """
+    Run the full extract/transform/load pipeline for a single repository.
+
+    This is the unit of work executed per worker thread. It creates its own
+    ``requests.Session`` so that repos processed concurrently never share or
+    clobber each other's ``Authorization`` header (installation access tokens are
+    cached per installation, and the header is rewritten on refresh).
+
+    Args:
+        repo: Repository in "owner/repo" format
+        github_app_id: GitHub App ID, or None to run unauthenticated
+        github_private_key: RSA private key (PEM), or None to run unauthenticated
+        github_api_url: GitHub API base URL
+        bigquery_client: Shared BigQuery client (thread-safe for queries/loads)
+        bigquery_dataset: BigQuery dataset ID
+        snapshot_date: Snapshot date string in YYYY-MM-DD format
+        use_streaming_insert: Whether to use streaming inserts (emulator only)
+
+    Returns:
+        Number of PRs processed for this repo.
+    """
+    # Each thread gets its own session; requests.Session is not safe to share
+    # across threads and we rewrite the Authorization header per repo.
+    session = _build_session()
+
+    # Build a per-repo token refresh callable when running authenticated. Bound
+    # once here (no None-then-redeclare) so the name has a single, clear type.
+    refresh_auth = (
+        _make_refresh_auth(
+            session, repo, github_app_id, github_private_key, github_api_url
+        )
+        if github_app_id and github_private_key
+        else None
+    )
+    if refresh_auth is not None:
+        # Set the token immediately so the first generator page is authenticated.
+        refresh_auth()
+
+    # Delete any existing rows for this (repo, snapshot_date) before loading.
+    # This makes every run idempotent: if a previous run crashed mid-way and left
+    # partial data, a rerun will clean up the partial write and reload cleanly.
+    if snapshot_exists(bigquery_client, bigquery_dataset, repo, snapshot_date):
+        logger.info(
+            f"Deleting partial/existing snapshot for {repo} on {snapshot_date} before reload"
+        )
+        delete_existing_snapshot(bigquery_client, bigquery_dataset, repo, snapshot_date)
+
+    processed = 0
+    for chunk_count, chunk in enumerate(
+        extract_pull_requests(
+            session,
+            repo,
+            chunk_size=100,
+            github_api_url=github_api_url,
+            refresh_auth=refresh_auth,
+        ),
+        start=1,
+    ):
+        logger.info(f"[{repo}] Processing chunk {chunk_count} with {len(chunk)} PRs")
+
+        # Transform
+        transformed_data = transform_data(chunk, repo)
+
+        # Load
+        load_data(
+            bigquery_client,
+            bigquery_dataset,
+            transformed_data,
+            snapshot_date,
+            use_streaming_insert=use_streaming_insert,
+        )
+
+        processed += len(chunk)
+        logger.info(
+            f"[{repo}] Completed chunk {chunk_count}. PRs processed for repo: {processed}"
+        )
+
+    return processed
+
+
 def main() -> int:
     """
     Main ETL process with chunked processing.
@@ -879,16 +1153,6 @@ def _main() -> int:
     if not bigquery_dataset:
         raise SystemExit("Environment variable BIGQUERY_DATASET is required")
 
-    # Setup GitHub session; the Authorization header is updated before each repo using
-    # an installation access token (which may be cached)
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "gh-pr-scraper/1.0 (+https://api.github.com)",
-        }
-    )
-
     github_api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
     if os.environ.get("GITHUB_API_URL"):
         logger.info(f"Using custom GitHub API URL: {github_api_url}")
@@ -910,7 +1174,12 @@ def _main() -> int:
     github_repos = []
     github_repos_str = os.getenv("GITHUB_REPOS")
     if github_repos_str:
-        github_repos = [r.strip() for r in github_repos_str.split(",") if r.strip()]
+        # Deduplicate while preserving order: with concurrent processing, a repo
+        # listed twice would otherwise have its delete_existing_snapshot() and
+        # load_data() interleave with its duplicate, corrupting the snapshot.
+        github_repos = list(
+            dict.fromkeys(r.strip() for r in github_repos_str.split(",") if r.strip())
+        )
     else:
         raise SystemExit(
             "Environment variable GITHUB_REPOS is required (format: 'owner/repo,owner/repo')"
@@ -921,83 +1190,47 @@ def _main() -> int:
 
     failed_repos: list[str] = []
 
-    for repo in github_repos:
-        try:
-            # Delete any existing rows for this (repo, snapshot_date) before loading.
-            # This makes every run idempotent: if a previous run crashed mid-way and left
-            # partial data, a rerun will clean up the partial write and reload cleanly.
-            if snapshot_exists(bigquery_client, bigquery_dataset, repo, snapshot_date):
-                logger.info(
-                    f"Deleting partial/existing snapshot for {repo} on {snapshot_date} before reload"
-                )
-                delete_existing_snapshot(
-                    bigquery_client, bigquery_dataset, repo, snapshot_date
-                )
+    # Each repo is independent (its own session, token, and BigQuery rows keyed by
+    # target_repository), so they are processed concurrently. The work is I/O-bound
+    # (GitHub API + BigQuery), so threads — not processes — are the right fit.
+    max_workers = _resolve_max_workers(len(github_repos))
+    logger.info(
+        f"Processing {len(github_repos)} repo(s) with up to {max_workers} worker(s)"
+    )
 
-            # Build a per-repo token refresh callable. It is called by the generator
-            # before each page fetch, so every API request (PRs + commits + reviewers +
-            # comments) uses a valid token. The access_token_cache means this only hits
-            # the GitHub API when the cached token has <60 seconds remaining.
-            refresh_auth: Callable[[], None] | None = None
-            if github_app_id and github_private_key:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_repo = {
+            executor.submit(
+                process_repo,
+                repo,
+                github_app_id,
+                github_private_key,
+                github_api_url,
+                bigquery_client,
+                bigquery_dataset,
+                snapshot_date,
+                bool(emulator_host),
+            ): repo
+            for repo in github_repos
+        }
 
-                def _make_refresh(
-                    _repo: str = repo,
-                ) -> Callable[[], None]:
-                    def _refresh() -> None:
-                        try:
-                            app_jwt = generate_github_jwt(
-                                github_app_id, github_private_key
-                            )
-                            access_token = get_installation_access_token(
-                                app_jwt, _repo, github_api_url
-                            )
-                        except Exception as e:
-                            raise RuntimeError(
-                                f"Failed to obtain GitHub App access token for {_repo}: {e}. "
-                                "Check that GITHUB_APP_ID is correct and GITHUB_PRIVATE_KEY "
-                                "is a valid PEM-encoded RSA private key."
-                            ) from e
-                        session.headers["Authorization"] = f"Bearer {access_token}"
-
-                    return _refresh
-
-                refresh_auth = _make_refresh()
-                # Set the token immediately so the first generator page is authenticated.
-                refresh_auth()
-
-            for chunk_count, chunk in enumerate(
-                extract_pull_requests(
-                    session,
-                    repo,
-                    chunk_size=100,
-                    github_api_url=github_api_url,
-                    refresh_auth=refresh_auth,
-                ),
-                start=1,
-            ):
-                logger.info(f"Processing chunk {chunk_count} with {len(chunk)} PRs")
-
-                # Transform
-                transformed_data = transform_data(chunk, repo)
-
-                # Load
-                load_data(
-                    bigquery_client,
-                    bigquery_dataset,
-                    transformed_data,
-                    snapshot_date,
-                    use_streaming_insert=bool(emulator_host),
-                )
-
-                total_processed += len(chunk)
-                logger.info(
-                    f"Completed chunk {chunk_count}. Total PRs processed: {total_processed}"
-                )
-        except (TooManyRetriesError, RuntimeError) as exc:
-            logger.error(f"Failed to process repo {repo}: {exc}")
-            failed_repos.append(repo)
-            continue
+        for future in concurrent.futures.as_completed(future_to_repo):
+            repo = future_to_repo[future]
+            try:
+                processed = future.result()
+            except Exception as exc:
+                # Catch broadly so one repo's failure (a TooManyRetriesError, a
+                # RuntimeError, or a bare Exception from load_data) is recorded as a
+                # failed repo rather than propagating out of the executor and
+                # discarding the results of other in-flight repos. logger.exception
+                # records the worker thread's traceback for debugging in CI/prod.
+                logger.exception(f"Failed to process repo {repo}: {exc}")
+                failed_repos.append(repo)
+                continue
+            total_processed += processed
+            logger.info(
+                f"Finished repo {repo}: {processed} PRs. Total so far: {total_processed}"
+            )
 
     if failed_repos:
         logger.error(
