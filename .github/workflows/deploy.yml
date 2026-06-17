@@ -15,7 +15,7 @@ jobs:
       contents: read
       id-token: write
       packages: write
-    uses: mozilla-it/deploy-actions/.github/workflows/build-and-push.yml@main
+    uses: mozilla/deploy-actions/.github/workflows/build-and-push.yml@main
     with:
       image_name: github-etl
       gar_name: lando-prod
