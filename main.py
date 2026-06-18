@@ -40,6 +40,11 @@ _REQUEST_TIMEOUT: float = 30.0
 # Default ceiling on concurrent repo workers (overridable via GITHUB_ETL_MAX_WORKERS).
 _DEFAULT_MAX_WORKERS: int = 8
 
+# Default hours subtracted from the prior-snapshot watermark when computing the
+# incremental `since` floor (overridable via GITHUB_ETL_LOOKBACK_HOURS). The buffer
+# absorbs eventual-consistency lag and PRs whose updated_at wasn't bumped.
+_DEFAULT_LOOKBACK_HOURS: int = 24
+
 # Ordered data columns for each BigQuery table, EXCLUDING the snapshot_date column
 # (which is stamped per load). Kept in sync with data.yml / the production schema
 # and with the row dicts built in transform_data(). Used to build carry-forward
@@ -998,8 +1003,11 @@ def get_prior_snapshot_watermark(
         )
         return None, None
 
-    # An aggregate query always yields exactly one row; prior_date is NULL when no
-    # earlier snapshot exists for this repo.
+    # An aggregate query always yields exactly one row in BigQuery; guard against an
+    # empty result anyway (e.g. a mocked client) so callers get (None, None) rather
+    # than an IndexError. prior_date is NULL when no earlier snapshot exists.
+    if not rows:
+        return None, None
     row = rows[0]
     if row.prior_date is None:
         return None, None
@@ -1298,6 +1306,47 @@ def _resolve_max_workers(repo_count: int) -> int:
     return max(1, min(repo_count, cap))
 
 
+def _resolve_lookback_hours() -> int:
+    """
+    Resolve the incremental lookback window (hours) from the environment.
+
+    Defaults to ``_DEFAULT_LOOKBACK_HOURS``; overridable via
+    ``GITHUB_ETL_LOOKBACK_HOURS``. Accepts any value >= 0 (0 means no buffer);
+    a negative or non-integer value is ignored and the default is used.
+
+    Returns:
+        Lookback window in hours.
+    """
+    override = os.environ.get("GITHUB_ETL_LOOKBACK_HOURS")
+    if override:
+        try:
+            parsed = int(override)
+            if parsed >= 0:
+                return parsed
+            logger.warning(f"Ignoring negative GITHUB_ETL_LOOKBACK_HOURS={override!r}")
+        except ValueError:
+            logger.warning(f"Ignoring invalid GITHUB_ETL_LOOKBACK_HOURS={override!r}")
+    return _DEFAULT_LOOKBACK_HOURS
+
+
+def _env_flag(name: str) -> bool:
+    """Return True if env var *name* is set to a truthy value (1/true/yes/on)."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _format_since(watermark: datetime, lookback_hours: int) -> str:
+    """
+    Build the incremental ``since`` floor from a watermark and lookback window.
+
+    Subtracts *lookback_hours* from *watermark* and formats the result as a GitHub
+    ISO-8601 UTC timestamp (``YYYY-MM-DDTHH:MM:SSZ``) matching what
+    extract_pull_requests compares against. The watermark is the UTC-aware
+    MAX(date_modified) from BigQuery.
+    """
+    since_dt = watermark - timedelta(hours=lookback_hours)
+    return since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _make_refresh_auth(
     session: requests.Session,
     repo: str,
@@ -1338,14 +1387,25 @@ def process_repo(
     bigquery_dataset: str,
     snapshot_date: str,
     use_streaming_insert: bool,
+    lookback_hours: int = _DEFAULT_LOOKBACK_HOURS,
+    full_refresh: bool = False,
 ) -> int:
     """
-    Run the full extract/transform/load pipeline for a single repository.
+    Run the extract/transform/load pipeline for a single repository.
 
     This is the unit of work executed per worker thread. It creates its own
     ``requests.Session`` so that repos processed concurrently never share or
     clobber each other's ``Authorization`` header (installation access tokens are
     cached per installation, and the header is rewritten on refresh).
+
+    Chooses between two strategies per repo:
+      - Full export (first run for the repo, or *full_refresh*): stream every PR
+        in chunks straight into today's snapshot.
+      - Incremental: carry the most recent prior snapshot forward into today, then
+        fetch only PRs updated since the prior watermark (minus *lookback_hours*)
+        and reconcile them into today's snapshot. A PR whose only change did not
+        bump its updated_at can be missed until the next full refresh; the lookback
+        buffer makes this rare.
 
     Args:
         repo: Repository in "owner/repo" format
@@ -1356,6 +1416,9 @@ def process_repo(
         bigquery_dataset: BigQuery dataset ID
         snapshot_date: Snapshot date string in YYYY-MM-DD format
         use_streaming_insert: Whether to use streaming inserts (emulator only)
+        lookback_hours: Hours subtracted from the prior watermark to form the
+            incremental ``since`` floor.
+        full_refresh: When True, always do a full export regardless of prior data.
 
     Returns:
         Number of PRs processed for this repo.
@@ -1377,15 +1440,76 @@ def process_repo(
         # Set the token immediately so the first generator page is authenticated.
         refresh_auth()
 
-    # Delete any existing rows for this (repo, snapshot_date) before loading.
-    # This makes every run idempotent: if a previous run crashed mid-way and left
-    # partial data, a rerun will clean up the partial write and reload cleanly.
+    # Look up the most recent prior snapshot and its modification watermark before
+    # touching today's rows (this only reads snapshots earlier than today).
+    prior_date, watermark = get_prior_snapshot_watermark(
+        bigquery_client, bigquery_dataset, repo, snapshot_date
+    )
+
+    # Re-run safety: clear any partial/previous rows for today before (re)building.
+    # If a previous run crashed mid-way, a rerun cleans up the partial write and
+    # rebuilds today's snapshot cleanly.
     if snapshot_exists(bigquery_client, bigquery_dataset, repo, snapshot_date):
         logger.info(
             f"Deleting partial/existing snapshot for {repo} on {snapshot_date} before reload"
         )
         delete_existing_snapshot(bigquery_client, bigquery_dataset, repo, snapshot_date)
 
+    # Incremental sync needs a prior snapshot to carry forward and a usable
+    # watermark to bound the fetch. Without both (first run, new repo, or all
+    # date_modified NULL), or when a full refresh is forced, do a full export.
+    incremental = not full_refresh and prior_date is not None and watermark is not None
+
+    if not incremental:
+        reason = "full refresh forced" if full_refresh else "no prior snapshot"
+        logger.info(f"[{repo}] Full export ({reason})")
+        processed = 0
+        for chunk_count, chunk in enumerate(
+            extract_pull_requests(
+                session,
+                repo,
+                chunk_size=100,
+                github_api_url=github_api_url,
+                refresh_auth=refresh_auth,
+            ),
+            start=1,
+        ):
+            logger.info(
+                f"[{repo}] Processing chunk {chunk_count} with {len(chunk)} PRs"
+            )
+            transformed_data = transform_data(chunk, repo)
+            load_data(
+                bigquery_client,
+                bigquery_dataset,
+                transformed_data,
+                snapshot_date,
+                use_streaming_insert=use_streaming_insert,
+            )
+            processed += len(chunk)
+            logger.info(
+                f"[{repo}] Completed chunk {chunk_count}. PRs processed for repo: {processed}"
+            )
+        return processed
+
+    # Incremental path: baseline today from the prior snapshot, then overlay only
+    # the PRs that changed since the watermark.
+    since = _format_since(watermark, lookback_hours)
+    logger.info(
+        f"[{repo}] Incremental export: carrying forward {prior_date}, "
+        f"fetching PRs updated since {since}"
+    )
+    carry_forward_snapshot(
+        bigquery_client, bigquery_dataset, repo, prior_date, snapshot_date
+    )
+
+    # The delta is only the changed PRs, so accumulating it in memory (rather than
+    # loading per chunk like the full path) is cheap and lets reconcile run once.
+    delta: dict = {
+        "pull_requests": [],
+        "commits": [],
+        "reviewers": [],
+        "comments": [],
+    }
     processed = 0
     for chunk_count, chunk in enumerate(
         extract_pull_requests(
@@ -1394,28 +1518,27 @@ def process_repo(
             chunk_size=100,
             github_api_url=github_api_url,
             refresh_auth=refresh_auth,
+            since=since,
         ),
         start=1,
     ):
-        logger.info(f"[{repo}] Processing chunk {chunk_count} with {len(chunk)} PRs")
-
-        # Transform
-        transformed_data = transform_data(chunk, repo)
-
-        # Load
-        load_data(
-            bigquery_client,
-            bigquery_dataset,
-            transformed_data,
-            snapshot_date,
-            use_streaming_insert=use_streaming_insert,
-        )
-
-        processed += len(chunk)
         logger.info(
-            f"[{repo}] Completed chunk {chunk_count}. PRs processed for repo: {processed}"
+            f"[{repo}] Processing changed chunk {chunk_count} with {len(chunk)} PRs"
         )
+        transformed_data = transform_data(chunk, repo)
+        for key in delta:
+            delta[key].extend(transformed_data.get(key, []))
+        processed += len(chunk)
 
+    reconcile_delta(
+        bigquery_client,
+        bigquery_dataset,
+        repo,
+        delta,
+        snapshot_date,
+        use_streaming_insert=use_streaming_insert,
+    )
+    logger.info(f"[{repo}] Reconciled {processed} changed PR(s)")
     return processed
 
 
@@ -1497,6 +1620,14 @@ def _main() -> int:
     total_processed = 0
     snapshot_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    # Incremental sync configuration.
+    lookback_hours = _resolve_lookback_hours()
+    full_refresh = _env_flag("GITHUB_ETL_FULL_REFRESH")
+    if full_refresh:
+        logger.info("GITHUB_ETL_FULL_REFRESH set — forcing a full export for all repos")
+    else:
+        logger.info(f"Incremental sync enabled (lookback {lookback_hours}h)")
+
     failed_repos: list[str] = []
 
     # Each repo is independent (its own session, token, and BigQuery rows keyed by
@@ -1519,6 +1650,8 @@ def _main() -> int:
                 bigquery_dataset,
                 snapshot_date,
                 bool(emulator_host),
+                lookback_hours,
+                full_refresh,
             ): repo
             for repo in github_repos
         }

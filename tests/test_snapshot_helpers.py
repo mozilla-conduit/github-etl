@@ -51,6 +51,17 @@ def test_watermark_returns_none_when_no_prior_snapshot(mock_bigquery_client):
     assert result == (None, None)
 
 
+def test_watermark_returns_none_when_result_empty(mock_bigquery_client):
+    """An empty result set (e.g. a mocked client) returns (None, None), not IndexError."""
+    mock_bigquery_client.query.return_value.result.return_value = []
+
+    result = main.get_prior_snapshot_watermark(
+        mock_bigquery_client, "test_dataset", "mozilla/firefox", "2026-06-20"
+    )
+
+    assert result == (None, None)
+
+
 def test_watermark_missing_table_returns_none(mock_bigquery_client):
     """A missing pull_requests table (first run) is swallowed → (None, None)."""
     mock_bigquery_client.query.return_value.result.side_effect = (
