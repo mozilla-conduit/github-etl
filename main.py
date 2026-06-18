@@ -1166,6 +1166,89 @@ def load_data(
         )
 
 
+def reconcile_delta(
+    client: bigquery.Client,
+    dataset_id: str,
+    repo: str,
+    transformed_delta: dict,
+    snapshot_date: str,
+    use_streaming_insert: bool = False,
+) -> None:
+    """
+    Overlay a repo's changed-PR delta onto today's carried-forward snapshot.
+
+    Given the freshly fetched-and-transformed data for only the PRs that changed
+    since the last run, this replaces those PRs' carried-forward rows (written by
+    carry_forward_snapshot) with the new data, across all four tables:
+
+      1. The set of changed pull_request_ids (from the delta's pull_requests rows)
+         is the reconcile key for EVERY table. Keying child deletes on the parent
+         id set — not each child's own rows — means a changed PR's stale child rows
+         (e.g. a removed comment) are deleted even when the delta now has zero
+         child rows for that PR.
+      2. Delete those PRs' rows from today's snapshot for this repo.
+      3. Insert the fresh delta via load_data (which stamps snapshot_date and
+         honors the streaming/load-job toggle).
+
+    A PR created since the watermark is in the delta but not the carried-forward
+    baseline: its delete matches nothing and its insert simply adds it.
+
+    DELETE runs before INSERT and only removes rows produced by
+    carry_forward_snapshot's INSERT...SELECT (managed storage, immediately
+    mutable), so there is no streaming-buffer conflict.
+
+    Args:
+        client: BigQuery client instance
+        dataset_id: BigQuery dataset ID
+        repo: Repository in "owner/repo" format
+        transformed_delta: transform_data() output for the changed PRs only
+            (tables 'pull_requests', 'commits', 'reviewers', 'comments').
+        snapshot_date: Today's snapshot date (YYYY-MM-DD).
+        use_streaming_insert: Passed through to load_data (emulator only).
+    """
+    pr_ids = sorted(
+        {
+            row["pull_request_id"]
+            for row in transformed_delta.get("pull_requests", [])
+            if row.get("pull_request_id") is not None
+        }
+    )
+
+    if not pr_ids:
+        # Nothing changed since the watermark; the carried-forward snapshot already
+        # stands as today's data, so there is nothing to replace.
+        logger.info(f"No changed PRs to reconcile for {repo} on {snapshot_date}")
+        return
+
+    for table in _TABLE_COLUMNS:
+        dml = f"""
+            DELETE FROM `{client.project}.{dataset_id}.{table}`
+            WHERE snapshot_date = @snapshot_date
+              AND target_repository = @repo
+              AND pull_request_id IN UNNEST(@pr_ids)
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("snapshot_date", "DATE", snapshot_date),
+                bigquery.ScalarQueryParameter("repo", "STRING", repo),
+                bigquery.ArrayQueryParameter("pr_ids", "INT64", pr_ids),
+            ]
+        )
+        client.query(dml, job_config=job_config).result()
+        logger.info(
+            f"Reconciled {table}: removed prior rows for {len(pr_ids)} changed PR(s) "
+            f"for {repo} on {snapshot_date}"
+        )
+
+    load_data(
+        client,
+        dataset_id,
+        transformed_delta,
+        snapshot_date,
+        use_streaming_insert=use_streaming_insert,
+    )
+
+
 def _build_session() -> requests.Session:
     """
     Create a ``requests.Session`` with the default GitHub API headers.
