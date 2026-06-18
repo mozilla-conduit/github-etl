@@ -265,12 +265,38 @@ def setup_logging() -> None:
     )
 
 
+def _parse_github_timestamp(value: str | None) -> datetime | None:
+    """
+    Parse a GitHub ISO-8601 timestamp (e.g. ``2026-06-17T14:53:58Z``) into an
+    aware ``datetime``.
+
+    GitHub serializes timestamps with a trailing ``Z`` for UTC, which
+    ``datetime.fromisoformat`` only accepts from Python 3.11 onward; we normalize
+    it to ``+00:00`` first so parsing is robust. Comparing parsed datetimes (vs.
+    raw strings) avoids subtle bugs where formats differ only in fractional
+    seconds (``...:58Z`` vs ``...:58.000Z``).
+
+    Args:
+        value: Timestamp string, or None.
+
+    Returns:
+        An aware ``datetime``, or None if the value is missing/unparseable.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def extract_pull_requests(
     session: requests.Session,
     repo: str,
     chunk_size: int = 100,
     github_api_url: str = "https://api.github.com",
     refresh_auth: Callable[[], None] | None = None,
+    since: str | None = None,
 ) -> Iterator[list[dict]]:
     """
     Extract data from GitHub repositories in chunks.
@@ -285,18 +311,32 @@ def extract_pull_requests(
         refresh_auth: Optional callable invoked before each page fetch to refresh
             the session's Authorization header. Use this to prevent installation
             tokens (1-hour TTL) from expiring mid-extraction on large repos.
+        since: Optional ISO-8601 UTC timestamp (e.g. ``2026-06-17T14:53:58Z``).
+            When provided, enables *incremental* extraction: PRs are fetched
+            sorted by ``updated`` descending, only PRs with
+            ``updated_at >= since`` are yielded, and pagination stops as soon as
+            an older PR is reached. The per-PR commit/review/comment sub-fetches
+            run only for the kept PRs. A PR with a missing or unparseable
+            ``updated_at`` is kept and does not trigger the stop. When None
+            (default), all PRs are fetched sorted by ``created`` ascending.
+
+            NOTE: callers deriving ``since`` from a stored watermark must format
+            it as an ISO-8601 UTC string so the comparison is meaningful.
 
     Yields:
         List of pull request dictionaries (up to chunk_size items)
     """
     logger.info("Starting data extraction from GitHub repositories")
 
+    incremental = since is not None
+    since_dt = _parse_github_timestamp(since) if incremental else None
+
     base_url = f"{github_api_url}/repos/{repo}/pulls"
     params: dict = {
         "state": "all",
         "per_page": chunk_size,
-        "sort": "created",
-        "direction": "asc",
+        "sort": "updated" if incremental else "created",
+        "direction": "desc" if incremental else "asc",
     }
 
     total = 0
@@ -309,6 +349,21 @@ def extract_pull_requests(
 
         batch = resp.json()
         pages += 1
+
+        # In incremental mode the batch is sorted by updated_at descending, so the
+        # first PR older than `since` marks the watermark: it and everything after
+        # it is older, so we keep only the PRs at-or-after `since` and stop paging.
+        reached_watermark = False
+        if incremental and since_dt is not None:
+            kept: list[dict] = []
+            for pr in batch:
+                updated_dt = _parse_github_timestamp(pr.get("updated_at"))
+                if updated_dt is not None and updated_dt < since_dt:
+                    reached_watermark = True
+                    break
+                kept.append(pr)
+            batch = kept
+
         total += len(batch)
 
         if len(batch) > 0:
@@ -331,6 +386,9 @@ def extract_pull_requests(
                 )
 
             yield batch
+
+        if reached_watermark:
+            break
 
         # Pagination
         next_url = resp.links.get("next", {}).get("url")
