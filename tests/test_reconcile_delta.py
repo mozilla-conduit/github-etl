@@ -15,16 +15,6 @@ def _scalar_params(job_config) -> dict:
     }
 
 
-def _array_param(job_config, name):
-    """Return the ArrayQueryParameter with the given name, or None."""
-    from google.cloud import bigquery
-
-    for p in job_config.query_parameters:
-        if isinstance(p, bigquery.ArrayQueryParameter) and p.name == name:
-            return p
-    return None
-
-
 def _delta(pr_ids):
     """Build a minimal transformed-delta dict with the given pull_request_ids."""
     return {
@@ -67,7 +57,9 @@ def test_reconcile_deletes_per_table(mock_bigquery_client):
     for call in mock_bigquery_client.query.call_args_list:
         sql = call.args[0]
         assert "DELETE FROM" in sql
-        assert "IN UNNEST(@pr_ids)" in sql
+        # pr_ids are inlined as integer literals (portable to the emulator, which
+        # mis-types array params); ids 1 and 2 appear in the IN list.
+        assert "pull_request_id IN (1, 2)" in sql
         for table in main._TABLE_COLUMNS:
             if f"test-project.test_dataset.{table}`" in sql:
                 seen.add(table)
@@ -76,7 +68,7 @@ def test_reconcile_deletes_per_table(mock_bigquery_client):
 
 
 def test_reconcile_binds_params(mock_bigquery_client):
-    """Each DELETE binds snapshot_date, repo, and the pr_ids array."""
+    """Each DELETE binds snapshot_date and repo (pr_ids are inlined, not bound)."""
     with patch("main.load_data"):
         main.reconcile_delta(
             mock_bigquery_client,
@@ -92,11 +84,8 @@ def test_reconcile_binds_params(mock_bigquery_client):
         # ScalarQueryParameter coerces the "DATE"-typed string into a datetime.date.
         assert scalars["snapshot_date"] == ("DATE", date(2026, 6, 20))
         assert scalars["repo"] == ("STRING", "mozilla/firefox")
-
-        pr_ids = _array_param(job_config, "pr_ids")
-        assert pr_ids is not None
-        assert pr_ids.array_type == "INT64"
-        assert pr_ids.values == [1, 2]
+        # Only the two scalar params; the id set is inlined into the SQL.
+        assert len(job_config.query_parameters) == 2
 
 
 def test_reconcile_dedupes_and_filters_pr_ids(mock_bigquery_client):
@@ -119,10 +108,8 @@ def test_reconcile_dedupes_and_filters_pr_ids(mock_bigquery_client):
             mock_bigquery_client, "test_dataset", "mozilla/firefox", delta, "2026-06-20"
         )
 
-    pr_ids = _array_param(
-        mock_bigquery_client.query.call_args_list[0].kwargs["job_config"], "pr_ids"
-    )
-    assert pr_ids.values == [3, 5]
+    sql = mock_bigquery_client.query.call_args_list[0].args[0]
+    assert "pull_request_id IN (3, 5)" in sql
 
 
 def test_reconcile_loads_delta_after_deletes(mock_bigquery_client):

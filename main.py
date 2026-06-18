@@ -1049,9 +1049,12 @@ def carry_forward_snapshot(
         # Column identifiers come from the constant _TABLE_COLUMNS, never user
         # input, so joining them into the SQL is safe; only the values are bound.
         col_list = ", ".join(columns)
+        # CAST the date param explicitly to DATE: it is a no-op against production
+        # BigQuery but makes the projected column's type unambiguous (the emulator's
+        # analyzer otherwise infers STRING and rejects the INSERT into a DATE column).
         dml = f"""
             INSERT INTO `{client.project}.{dataset_id}.{table}` ({col_list}, snapshot_date)
-            SELECT {col_list}, @snapshot_date
+            SELECT {col_list}, CAST(@snapshot_date AS DATE)
             FROM `{client.project}.{dataset_id}.{table}`
             WHERE target_repository = @repo
               AND snapshot_date = @prior_date
@@ -1216,7 +1219,7 @@ def reconcile_delta(
     """
     pr_ids = sorted(
         {
-            row["pull_request_id"]
+            int(row["pull_request_id"])
             for row in transformed_delta.get("pull_requests", [])
             if row.get("pull_request_id") is not None
         }
@@ -1228,18 +1231,23 @@ def reconcile_delta(
         logger.info(f"No changed PRs to reconcile for {repo} on {snapshot_date}")
         return
 
+    # pr_ids are validated integers, so inlining them as integer literals is
+    # injection-safe. This is also more portable than a typed array parameter (the
+    # BigQuery emulator infers an array param's element type as STRING, breaking
+    # IN UNNEST against the INT64 pull_request_id column).
+    id_list = ", ".join(str(pr_id) for pr_id in pr_ids)
+
     for table in _TABLE_COLUMNS:
         dml = f"""
             DELETE FROM `{client.project}.{dataset_id}.{table}`
             WHERE snapshot_date = @snapshot_date
               AND target_repository = @repo
-              AND pull_request_id IN UNNEST(@pr_ids)
+              AND pull_request_id IN ({id_list})
         """
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("snapshot_date", "DATE", snapshot_date),
                 bigquery.ScalarQueryParameter("repo", "STRING", repo),
-                bigquery.ArrayQueryParameter("pr_ids", "INT64", pr_ids),
             ]
         )
         client.query(dml, job_config=job_config).result()
