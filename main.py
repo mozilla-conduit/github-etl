@@ -40,6 +40,53 @@ _REQUEST_TIMEOUT: float = 30.0
 # Default ceiling on concurrent repo workers (overridable via GITHUB_ETL_MAX_WORKERS).
 _DEFAULT_MAX_WORKERS: int = 8
 
+# Ordered data columns for each BigQuery table, EXCLUDING the snapshot_date column
+# (which is stamped per load). Kept in sync with data.yml / the production schema
+# and with the row dicts built in transform_data(). Used to build carry-forward
+# INSERT...SELECT statements (and, later, the reconcile delta) without SELECT *.
+_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "pull_requests": (
+        "pull_request_id",
+        "current_status",
+        "date_created",
+        "date_modified",
+        "target_repository",
+        "bug_id",
+        "date_landed",
+        "date_approved",
+        "labels",
+    ),
+    "commits": (
+        "pull_request_id",
+        "target_repository",
+        "commit_sha",
+        "date_created",
+        "author_username",
+        "author_email",
+        "filename",
+        "lines_removed",
+        "lines_added",
+    ),
+    "reviewers": (
+        "pull_request_id",
+        "target_repository",
+        "date_reviewed",
+        "reviewer_email",
+        "reviewer_username",
+        "status",
+    ),
+    "comments": (
+        "pull_request_id",
+        "target_repository",
+        "comment_id",
+        "date_created",
+        "author_email",
+        "author_username",
+        "character_count",
+        "status",
+    ),
+}
+
 
 class TooManyRetriesError(Exception):
     """Raised when all retry attempts for a GitHub API request are exhausted."""
@@ -890,6 +937,127 @@ def delete_existing_snapshot(
         client.query(dml, job_config=job_config).result()
         logger.info(
             f"Deleted existing snapshot rows from {table} for {repo} on {snapshot_date}"
+        )
+
+
+def get_prior_snapshot_watermark(
+    client: bigquery.Client,
+    dataset_id: str,
+    repo: str,
+    snapshot_date: str,
+) -> tuple[str | None, datetime | None]:
+    """
+    Find the most recent prior snapshot for a repo and its modification watermark.
+
+    Used by incremental sync to (a) know which snapshot to carry forward and
+    (b) compute the ``since`` floor for fetching only changed PRs. Both values
+    come from a single aggregate query against the pull_requests table.
+
+    Args:
+        client: BigQuery client instance
+        dataset_id: BigQuery dataset ID
+        repo: Repository in "owner/repo" format
+        snapshot_date: Today's snapshot date (YYYY-MM-DD); the search is bounded
+            to strictly earlier snapshots so a partial/in-progress run for today
+            never seeds its own watermark.
+
+    Returns:
+        A ``(prior_date, watermark)`` tuple:
+          - prior_date: the latest snapshot_date strictly before *snapshot_date*
+            as a "YYYY-MM-DD" string, or None if this repo has no prior snapshot
+            (first run / new repo / missing table).
+          - watermark: the maximum date_modified across that prior data as an
+            aware UTC datetime, or None. A non-None *prior_date* with a None
+            *watermark* (all date_modified NULL) means no usable ``since`` floor
+            exists — callers should fall back to a full fetch in that case.
+    """
+    query = f"""
+        SELECT MAX(snapshot_date) AS prior_date, MAX(date_modified) AS watermark
+        FROM `{client.project}.{dataset_id}.pull_requests`
+        WHERE target_repository = @repo
+          AND snapshot_date < @snapshot_date
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("snapshot_date", "DATE", snapshot_date),
+            bigquery.ScalarQueryParameter("repo", "STRING", repo),
+        ]
+    )
+    try:
+        rows = list(client.query(query, job_config=job_config).result())
+    except api_exceptions.NotFound as e:
+        # Mirror snapshot_exists: a missing table is expected on first run, but a
+        # missing dataset is a config error that should fail loudly.
+        if f"datasets/{dataset_id}" in str(e):
+            logger.error(
+                f"BigQuery dataset '{dataset_id}' not found — check BIGQUERY_DATASET config: {e}"
+            )
+            raise
+        logger.info(
+            f"Table pull_requests not found in {dataset_id}, no prior snapshot for {repo}"
+        )
+        return None, None
+
+    # An aggregate query always yields exactly one row; prior_date is NULL when no
+    # earlier snapshot exists for this repo.
+    row = rows[0]
+    if row.prior_date is None:
+        return None, None
+
+    prior_date = row.prior_date
+    prior_date_str = (
+        prior_date.isoformat() if hasattr(prior_date, "isoformat") else str(prior_date)
+    )
+    return prior_date_str, row.watermark
+
+
+def carry_forward_snapshot(
+    client: bigquery.Client,
+    dataset_id: str,
+    repo: str,
+    prior_date: str,
+    snapshot_date: str,
+) -> None:
+    """
+    Copy a repo's prior snapshot rows into today's snapshot via INSERT...SELECT.
+
+    This re-stamps every row from *prior_date* with *snapshot_date* across all
+    four tables, giving today a complete baseline; incremental sync then overlays
+    only the PRs that changed. INSERT...SELECT keeps the data in BigQuery (no
+    round-trip through this process).
+
+    IMPORTANT: callers must run delete_existing_snapshot(snapshot_date) BEFORE
+    this so a same-day re-run does not double-insert the carried-forward rows.
+
+    Args:
+        client: BigQuery client instance
+        dataset_id: BigQuery dataset ID
+        repo: Repository in "owner/repo" format
+        prior_date: Source snapshot date (YYYY-MM-DD) to copy from, e.g. the
+            prior_date returned by get_prior_snapshot_watermark().
+        snapshot_date: Target snapshot date (YYYY-MM-DD), i.e. today.
+    """
+    for table, columns in _TABLE_COLUMNS.items():
+        # Column identifiers come from the constant _TABLE_COLUMNS, never user
+        # input, so joining them into the SQL is safe; only the values are bound.
+        col_list = ", ".join(columns)
+        dml = f"""
+            INSERT INTO `{client.project}.{dataset_id}.{table}` ({col_list}, snapshot_date)
+            SELECT {col_list}, @snapshot_date
+            FROM `{client.project}.{dataset_id}.{table}`
+            WHERE target_repository = @repo
+              AND snapshot_date = @prior_date
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("snapshot_date", "DATE", snapshot_date),
+                bigquery.ScalarQueryParameter("prior_date", "DATE", prior_date),
+                bigquery.ScalarQueryParameter("repo", "STRING", repo),
+            ]
+        )
+        client.query(dml, job_config=job_config).result()
+        logger.info(
+            f"Carried forward {table} rows for {repo} from {prior_date} to {snapshot_date}"
         )
 
 
