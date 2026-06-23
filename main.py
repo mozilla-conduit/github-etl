@@ -380,8 +380,16 @@ def extract_pull_requests(
     """
     logger.info("Starting data extraction from GitHub repositories")
 
-    incremental = since is not None
-    since_dt = _parse_github_timestamp(since) if incremental else None
+    # A provided-but-unparseable `since` must not enable incremental mode: doing so
+    # would switch the request to updated/desc while leaving the watermark filter
+    # off (since_dt is None), fetching everything in the wrong order. Treat it like
+    # "not provided" and fall back to the full created/asc fetch.
+    since_dt = _parse_github_timestamp(since)
+    if since is not None and since_dt is None:
+        logger.warning(
+            f"Ignoring unparseable `since` value {since!r}; falling back to full extraction"
+        )
+    incremental = since_dt is not None
 
     base_url = f"{github_api_url}/repos/{repo}/pulls"
     params: dict = {
@@ -406,7 +414,7 @@ def extract_pull_requests(
         # first PR older than `since` marks the watermark: it and everything after
         # it is older, so we keep only the PRs at-or-after `since` and stop paging.
         reached_watermark = False
-        if incremental and since_dt is not None:
+        if incremental:
             kept: list[dict] = []
             for pr in batch:
                 updated_dt = _parse_github_timestamp(pr.get("updated_at"))
@@ -976,11 +984,26 @@ def get_prior_snapshot_watermark(
             *watermark* (all date_modified NULL) means no usable ``since`` floor
             exists — callers should fall back to a full fetch in that case.
     """
+    # Pin the watermark to the *same* snapshot we carry forward. Computing both
+    # MAX()s in one flat aggregate would let MAX(date_modified) be drawn from an
+    # older snapshot than MAX(snapshot_date), so a partial latest snapshot (or one
+    # with NULL date_modified rows) could yield a watermark ahead of its own data
+    # and silently skip changed PRs. The CTE finds the latest prior snapshot_date
+    # first, then takes the watermark only from rows in that snapshot.
+    table = f"`{client.project}.{dataset_id}.pull_requests`"
     query = f"""
-        SELECT MAX(snapshot_date) AS prior_date, MAX(date_modified) AS watermark
-        FROM `{client.project}.{dataset_id}.pull_requests`
-        WHERE target_repository = @repo
-          AND snapshot_date < @snapshot_date
+        WITH prior AS (
+            SELECT MAX(snapshot_date) AS prior_date
+            FROM {table}
+            WHERE target_repository = @repo
+              AND snapshot_date < @snapshot_date
+        )
+        SELECT prior.prior_date AS prior_date, MAX(pr.date_modified) AS watermark
+        FROM prior
+        LEFT JOIN {table} AS pr
+          ON pr.target_repository = @repo
+         AND pr.snapshot_date = prior.prior_date
+        GROUP BY prior.prior_date
     """
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -1469,7 +1492,12 @@ def process_repo(
     incremental = not full_refresh and prior_date is not None and watermark is not None
 
     if not incremental:
-        reason = "full refresh forced" if full_refresh else "no prior snapshot"
+        if full_refresh:
+            reason = "full refresh forced"
+        elif prior_date is None:
+            reason = "no prior snapshot"
+        else:
+            reason = f"prior snapshot {prior_date} has no usable watermark"
         logger.info(f"[{repo}] Full export ({reason})")
         processed = 0
         for chunk_count, chunk in enumerate(
