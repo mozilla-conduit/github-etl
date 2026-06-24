@@ -6,6 +6,7 @@ and loads it into a BigQuery dataset using chunked processing.
 """
 
 import concurrent.futures
+import itertools
 import logging
 import os
 import re
@@ -40,10 +41,17 @@ _REQUEST_TIMEOUT: float = 30.0
 # Default ceiling on concurrent repo workers (overridable via GITHUB_ETL_MAX_WORKERS).
 _DEFAULT_MAX_WORKERS: int = 8
 
+# Max changed-PR ids inlined into a single reconcile DELETE's IN (...) list. Keeps
+# the statement bounded when a large number of PRs change in one day; the ids are
+# deleted in successive batches per table.
+_RECONCILE_ID_BATCH_SIZE: int = 500
+
 # Default hours subtracted from the prior-snapshot watermark when computing the
-# incremental `since` floor (overridable via GITHUB_ETL_LOOKBACK_HOURS). The buffer
-# absorbs eventual-consistency lag and PRs whose updated_at wasn't bumped.
-_DEFAULT_LOOKBACK_HOURS: int = 24
+# incremental `since` floor (overridable via GITHUB_ETL_LOOKBACK_HOURS). The
+# watermark looks *before* data we already have, so this only needs to be large
+# enough to catch PRs updated in the same second as the watermark but not captured;
+# 1h is ample for that boundary. Bump GITHUB_ETL_LOOKBACK_HOURS for manual catch-up.
+_DEFAULT_LOOKBACK_HOURS: int = 1
 
 # Ordered data columns for each BigQuery table, EXCLUDING the snapshot_date column
 # (which is stamped per load). Kept in sync with data.yml / the production schema
@@ -323,10 +331,9 @@ def _parse_github_timestamp(value: str | None) -> datetime | None:
     aware ``datetime``.
 
     GitHub serializes timestamps with a trailing ``Z`` for UTC, which
-    ``datetime.fromisoformat`` only accepts from Python 3.11 onward; we normalize
-    it to ``+00:00`` first so parsing is robust. Comparing parsed datetimes (vs.
-    raw strings) avoids subtle bugs where formats differ only in fractional
-    seconds (``...:58Z`` vs ``...:58.000Z``).
+    ``datetime.fromisoformat`` accepts natively on the Python 3.11+ runtime we
+    target. Comparing parsed datetimes (vs. raw strings) avoids subtle bugs where
+    formats differ only in fractional seconds (``...:58Z`` vs ``...:58.000Z``).
 
     Args:
         value: Timestamp string, or None.
@@ -337,7 +344,7 @@ def _parse_github_timestamp(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -1257,23 +1264,26 @@ def reconcile_delta(
     # pr_ids are validated integers, so inlining them as integer literals is
     # injection-safe. This is also more portable than a typed array parameter (the
     # BigQuery emulator infers an array param's element type as STRING, breaking
-    # IN UNNEST against the INT64 pull_request_id column).
-    id_list = ", ".join(str(pr_id) for pr_id in pr_ids)
-
+    # IN UNNEST against the INT64 pull_request_id column). Chunk the ids so the
+    # inlined IN (...) list stays bounded no matter how many PRs changed in a day.
     for table in _TABLE_COLUMNS:
-        dml = f"""
-            DELETE FROM `{client.project}.{dataset_id}.{table}`
-            WHERE snapshot_date = @snapshot_date
-              AND target_repository = @repo
-              AND pull_request_id IN ({id_list})
-        """
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("snapshot_date", "DATE", snapshot_date),
-                bigquery.ScalarQueryParameter("repo", "STRING", repo),
-            ]
-        )
-        client.query(dml, job_config=job_config).result()
+        for batch in itertools.batched(pr_ids, _RECONCILE_ID_BATCH_SIZE, strict=False):
+            id_list = ", ".join(str(pr_id) for pr_id in batch)
+            dml = f"""
+                DELETE FROM `{client.project}.{dataset_id}.{table}`
+                WHERE snapshot_date = @snapshot_date
+                  AND target_repository = @repo
+                  AND pull_request_id IN ({id_list})
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter(
+                        "snapshot_date", "DATE", snapshot_date
+                    ),
+                    bigquery.ScalarQueryParameter("repo", "STRING", repo),
+                ]
+            )
+            client.query(dml, job_config=job_config).result()
         logger.info(
             f"Reconciled {table}: removed prior rows for {len(pr_ids)} changed PR(s) "
             f"for {repo} on {snapshot_date}"
@@ -1498,6 +1508,9 @@ def process_repo(
             reason = "no prior snapshot"
         else:
             reason = f"prior snapshot {prior_date} has no usable watermark"
+        # Drop any watermark so nothing downstream of this fork can mistake a stale
+        # value for a usable incremental floor.
+        watermark = None
         logger.info(f"[{repo}] Full export ({reason})")
         processed = 0
         for chunk_count, chunk in enumerate(
