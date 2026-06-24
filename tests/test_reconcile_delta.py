@@ -42,6 +42,7 @@ def test_reconcile_empty_delta_is_noop(mock_bigquery_client):
 
 def test_reconcile_deletes_per_table(mock_bigquery_client):
     """One DELETE ... IN (...) runs per table, each targeting that table."""
+    with patch("main.load_data"):
         main.reconcile_delta(
             mock_bigquery_client,
             "test_dataset",
