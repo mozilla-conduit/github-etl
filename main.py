@@ -341,8 +341,6 @@ def _parse_github_timestamp(value: str | None) -> datetime | None:
     Returns:
         An aware ``datetime``, or None if the value is missing/unparseable.
     """
-    if not value:
-        return None
     try:
         return datetime.fromisoformat(value)
     except ValueError, TypeError:
