@@ -346,6 +346,9 @@ def _parse_github_timestamp(value: str | None) -> datetime | None:
     try:
         return datetime.fromisoformat(value)
     except ValueError:
+    try:
+        return datetime.fromisoformat(value)
+    except (ValueError, TypeError):
         return None
 
 
