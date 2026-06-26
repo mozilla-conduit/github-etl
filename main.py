@@ -44,7 +44,7 @@ _DEFAULT_MAX_WORKERS: int = 8
 # Max changed-PR ids inlined into a single reconcile DELETE's IN (...) list. Keeps
 # the statement bounded when a large number of PRs change in one day; the ids are
 # deleted in successive batches per table.
-_RECONCILE_ID_BATCH_SIZE: int = 500
+_RECONCILE_ID_BATCH_SIZE: int = 100
 
 # Default hours subtracted from the prior-snapshot watermark when computing the
 # incremental `since` floor (overridable via GITHUB_ETL_LOOKBACK_HOURS). The
@@ -345,10 +345,7 @@ def _parse_github_timestamp(value: str | None) -> datetime | None:
         return None
     try:
         return datetime.fromisoformat(value)
-    except ValueError:
-    try:
-        return datetime.fromisoformat(value)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 
