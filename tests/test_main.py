@@ -629,6 +629,46 @@ class TestResolveMaxWorkers:
             assert main._resolve_max_workers(100) == main._DEFAULT_MAX_WORKERS
 
 
+class TestResolveLookbackHours:
+    """Tests for _resolve_lookback_hours."""
+
+    def test_defaults_when_unset(self):
+        with patch.dict(os.environ, {}, clear=True):
+            assert main._resolve_lookback_hours() == main._DEFAULT_LOOKBACK_HOURS
+
+    def test_env_override(self):
+        with patch.dict(os.environ, {"GITHUB_ETL_LOOKBACK_HOURS": "6"}, clear=True):
+            assert main._resolve_lookback_hours() == 6
+
+    def test_zero_is_allowed(self):
+        with patch.dict(os.environ, {"GITHUB_ETL_LOOKBACK_HOURS": "0"}, clear=True):
+            assert main._resolve_lookback_hours() == 0
+
+    def test_negative_falls_back_to_default(self):
+        with patch.dict(os.environ, {"GITHUB_ETL_LOOKBACK_HOURS": "-1"}, clear=True):
+            assert main._resolve_lookback_hours() == main._DEFAULT_LOOKBACK_HOURS
+
+    def test_invalid_falls_back_to_default(self):
+        with patch.dict(os.environ, {"GITHUB_ETL_LOOKBACK_HOURS": "abc"}, clear=True):
+            assert main._resolve_lookback_hours() == main._DEFAULT_LOOKBACK_HOURS
+
+
+class TestEnvFlag:
+    """Tests for the _env_flag truthy-value parser."""
+
+    def test_truthy_values(self):
+        for value in ("1", "true", "TRUE", "Yes", "on"):
+            with patch.dict(os.environ, {"GITHUB_ETL_FULL_REFRESH": value}, clear=True):
+                assert main._env_flag("GITHUB_ETL_FULL_REFRESH") is True
+
+    def test_falsy_and_absent_values(self):
+        for value in ("0", "false", "no", ""):
+            with patch.dict(os.environ, {"GITHUB_ETL_FULL_REFRESH": value}, clear=True):
+                assert main._env_flag("GITHUB_ETL_FULL_REFRESH") is False
+        with patch.dict(os.environ, {}, clear=True):
+            assert main._env_flag("GITHUB_ETL_FULL_REFRESH") is False
+
+
 @patch("main.setup_logging")
 @patch("main.bigquery.Client")
 @patch("requests.Session")

@@ -276,3 +276,175 @@ def test_skips_prs_without_number_field(mock_session):
 
     # extract_commits should only be called for PRs with number field
     assert mock_commits.call_count == 2
+
+
+def test_default_mode_sorts_by_created_ascending(mock_session):
+    """Without `since`, the request keeps the original created/asc sort."""
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = [{"number": 1, "title": "PR 1"}]
+    mock_response.links = {}
+
+    mock_session.get.return_value = mock_response
+
+    with (
+        patch("main.extract_commits", return_value=[]),
+        patch("main.extract_reviewers", return_value=[]),
+        patch("main.extract_comments", return_value=[]),
+    ):
+        list(main.extract_pull_requests(mock_session, "mozilla/firefox"))
+
+    params = mock_session.get.call_args[1]["params"]
+    assert params["sort"] == "created"
+    assert params["direction"] == "asc"
+
+
+def test_incremental_mode_sorts_by_updated_descending(mock_session):
+    """With `since`, the request switches to updated/desc for incremental sync."""
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = [
+        {"number": 1, "title": "PR 1", "updated_at": "2026-06-17T12:00:00Z"},
+    ]
+    mock_response.links = {}
+
+    mock_session.get.return_value = mock_response
+
+    with (
+        patch("main.extract_commits", return_value=[]),
+        patch("main.extract_reviewers", return_value=[]),
+        patch("main.extract_comments", return_value=[]),
+    ):
+        list(
+            main.extract_pull_requests(
+                mock_session, "mozilla/firefox", since="2026-06-01T00:00:00Z"
+            )
+        )
+
+    params = mock_session.get.call_args[1]["params"]
+    assert params["sort"] == "updated"
+    assert params["direction"] == "desc"
+
+
+def test_incremental_stops_at_watermark(mock_session):
+    """PRs older than `since` are dropped and pagination stops at the watermark."""
+    # Page sorted by updated_at descending: two PRs newer than `since`, then one
+    # older. The older PR marks the watermark — it and anything after must stop.
+    mock_response_1 = Mock()
+    mock_response_1.status_code = 200
+    mock_response_1.json.return_value = [
+        {"number": 3, "updated_at": "2026-06-17T12:00:00Z"},
+        {"number": 2, "updated_at": "2026-06-10T09:00:00Z"},
+        {"number": 1, "updated_at": "2026-05-01T09:00:00Z"},  # older than `since`
+    ]
+    mock_response_1.links = {
+        "next": {"url": "https://api.github.com/repos/mozilla/firefox/pulls?page=2"}
+    }
+
+    mock_session.get.side_effect = [mock_response_1]
+
+    with (
+        patch("main.extract_commits", return_value=[]),
+        patch("main.extract_reviewers", return_value=[]),
+        patch("main.extract_comments", return_value=[]),
+    ):
+        result = list(
+            main.extract_pull_requests(
+                mock_session, "mozilla/firefox", since="2026-06-01T00:00:00Z"
+            )
+        )
+
+    # Only the two PRs at-or-after the watermark are yielded...
+    assert len(result) == 1
+    assert [pr["number"] for pr in result[0]] == [3, 2]
+    # ...and the second page is never fetched despite the `next` link.
+    assert mock_session.get.call_count == 1
+
+
+def test_incremental_boundary_is_inclusive(mock_session):
+    """A PR whose updated_at equals `since` is kept (boundary is inclusive)."""
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = [
+        {"number": 1, "updated_at": "2026-06-01T00:00:00Z"},  # exactly `since`
+    ]
+    mock_response.links = {}
+
+    mock_session.get.return_value = mock_response
+
+    with (
+        patch("main.extract_commits", return_value=[]),
+        patch("main.extract_reviewers", return_value=[]),
+        patch("main.extract_comments", return_value=[]),
+    ):
+        result = list(
+            main.extract_pull_requests(
+                mock_session, "mozilla/firefox", since="2026-06-01T00:00:00Z"
+            )
+        )
+
+    assert len(result) == 1
+    assert result[0][0]["number"] == 1
+
+
+def test_incremental_subfetches_only_kept_prs(mock_session):
+    """Sub-fetches run only for PRs newer than `since`, not the older ones."""
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = [
+        {"number": 2, "updated_at": "2026-06-17T12:00:00Z"},
+        {"number": 1, "updated_at": "2026-05-01T09:00:00Z"},  # older than `since`
+    ]
+    mock_response.links = {}
+
+    mock_session.get.return_value = mock_response
+
+    with (
+        patch("main.extract_commits", return_value=[]) as mock_commits,
+        patch("main.extract_reviewers", return_value=[]),
+        patch("main.extract_comments", return_value=[]),
+    ):
+        result = list(
+            main.extract_pull_requests(
+                mock_session, "mozilla/firefox", since="2026-06-01T00:00:00Z"
+            )
+        )
+
+    # Only the kept PR (#2) is enriched; the older PR (#1) is never sub-fetched.
+    assert [pr["number"] for pr in result[0]] == [2]
+    assert mock_commits.call_count == 1
+
+
+def test_incremental_keeps_pr_with_missing_updated_at(mock_session):
+    """A PR with no updated_at is kept and does not trigger the watermark stop."""
+    mock_response_1 = Mock()
+    mock_response_1.status_code = 200
+    mock_response_1.json.return_value = [
+        {"number": 2, "updated_at": "2026-06-17T12:00:00Z"},
+        {"number": 1},  # missing updated_at — must be kept, must not stop paging
+    ]
+    mock_response_1.links = {
+        "next": {"url": "https://api.github.com/repos/mozilla/firefox/pulls?page=2"}
+    }
+
+    mock_response_2 = Mock()
+    mock_response_2.status_code = 200
+    mock_response_2.json.return_value = []
+    mock_response_2.links = {}
+
+    mock_session.get.side_effect = [mock_response_1, mock_response_2]
+
+    with (
+        patch("main.extract_commits", return_value=[]),
+        patch("main.extract_reviewers", return_value=[]),
+        patch("main.extract_comments", return_value=[]),
+    ):
+        result = list(
+            main.extract_pull_requests(
+                mock_session, "mozilla/firefox", since="2026-06-01T00:00:00Z"
+            )
+        )
+
+    assert [pr["number"] for pr in result[0]] == [2, 1]
+    # Pagination continued past the missing-timestamp PR to the (empty) page 2.
+    assert mock_session.get.call_count == 2
