@@ -305,9 +305,13 @@ def test_processes_chunks_iteratively(
         result = main.main()
 
     assert result == 0
-    # Transform and load should be called 3 times (once per chunk)
+    # Transform still runs once per chunk (extraction stays streamed/iterative)...
     assert mock_transform.call_count == 3
-    assert mock_load.call_count == 3
+    # ...but the full-export path now accumulates transformed rows and flushes them
+    # in batches of _FULL_EXPORT_FLUSH_PRS PRs to stay under BigQuery's per-table
+    # modification rate limit. 3 one-PR chunks are well under the threshold, so they
+    # coalesce into a single load.
+    assert mock_load.call_count == 1
 
 
 @patch("main.setup_logging")
@@ -488,8 +492,9 @@ def test_pagination_through_full_flow(
     ):
         main.main()
 
-    # Should be called twice (once per chunk/page)
-    assert mock_load.call_count == 2
+    # Both paginated PRs are accumulated and flushed together in one load (both
+    # chunks are well under the _FULL_EXPORT_FLUSH_PRS batch threshold).
+    assert mock_load.call_count == 1
 
 
 @patch("main.setup_logging")

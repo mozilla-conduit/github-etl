@@ -9,6 +9,7 @@ import concurrent.futures
 import itertools
 import logging
 import os
+import random
 import re
 import sys
 import threading
@@ -38,6 +39,21 @@ _RETRY_MULTIPLIER: float = 2.0
 _MAX_AUTH_RETRIES: int = 2
 _REQUEST_TIMEOUT: float = 30.0
 
+# Retry knobs for BigQuery write operations (load jobs and DML). BigQuery caps
+# table-modification operations per table. Because every repo writes to the same
+# handful of shared tables and repos run in parallel, bursts of load jobs / DML can
+# trip the per-table "too many table update operations" rate limit; that error is
+# transient, so writes are retried with jittered exponential backoff.
+_BQ_WRITE_MAX_RETRIES: int = 6
+_BQ_WRITE_BASE_DELAY: float = 2.0
+# BigQuery error reasons that are safe to retry. rateLimitExceeded is the per-table
+# table-modification burst limit; backendError/internalError are transient server
+# faults. quotaExceeded (e.g. the 1,500 ops/table/day ceiling) is intentionally
+# excluded: retrying a hard daily quota just burns time and fails anyway.
+_RETRYABLE_BQ_REASONS: frozenset[str] = frozenset(
+    {"rateLimitExceeded", "backendError", "internalError"}
+)
+
 # Default ceiling on concurrent repo workers (overridable via GITHUB_ETL_MAX_WORKERS).
 _DEFAULT_MAX_WORKERS: int = 8
 
@@ -45,6 +61,13 @@ _DEFAULT_MAX_WORKERS: int = 8
 # the statement bounded when a large number of PRs change in one day; the ids are
 # deleted in successive batches per table.
 _RECONCILE_ID_BATCH_SIZE: int = 100
+
+# In a full export, accumulate transformed rows across chunks and flush them to
+# BigQuery once this many PRs have piled up, instead of one load job per 100-PR
+# chunk. Fewer, larger load jobs stay well under BigQuery's per-table modification
+# rate limit (all repos write to the same shared tables and run in parallel) while
+# still bounding peak memory for very large repos. Overridable for tuning.
+_FULL_EXPORT_FLUSH_PRS: int = 1000
 
 # Default hours subtracted from the prior-snapshot watermark when computing the
 # incremental `since` floor (overridable via GITHUB_ETL_LOOKBACK_HOURS). The
@@ -109,6 +132,60 @@ def _apply_backoff(delay: float) -> float:
     """Sleep for *delay* seconds and return the next (capped) delay value."""
     time.sleep(delay)
     return min(delay * _RETRY_MULTIPLIER, _RETRY_MAX_DELAY)
+
+
+def _is_retryable_bq_error(exc: api_exceptions.GoogleAPICallError) -> bool:
+    """
+    Return True if a BigQuery API error is a transient, retryable condition.
+
+    Inspects the error's structured ``reason`` codes (a 403 rateLimitExceeded and
+    the 429/5xx server faults are retryable). A daily-quota exhaustion is not.
+    """
+    if isinstance(
+        exc,
+        (
+            api_exceptions.TooManyRequests,
+            api_exceptions.ServiceUnavailable,
+            api_exceptions.InternalServerError,
+        ),
+    ):
+        return True
+    for err in getattr(exc, "errors", None) or []:
+        if isinstance(err, dict) and err.get("reason") in _RETRYABLE_BQ_REASONS:
+            return True
+    return False
+
+
+def _retry_bigquery_write(operation: Callable[[], None], *, description: str) -> None:
+    """
+    Run a BigQuery write (load job or DML) with exponential-backoff retry.
+
+    Retries only transient conditions per _is_retryable_bq_error() — chiefly the
+    per-table table-modification rate limit ("too many table update operations")
+    that bursts of parallel writes to shared tables can trip. Jitter is added so
+    concurrent workers that all backed off do not retry in lockstep.
+
+    Args:
+        operation: Zero-arg callable that performs the write and blocks until done
+            (e.g. ``load_job.result()`` or ``client.query(dml).result()``).
+        description: Human-readable label for the write, used in log messages.
+    """
+    delay = _BQ_WRITE_BASE_DELAY
+    for attempt in range(1, _BQ_WRITE_MAX_RETRIES + 1):
+        try:
+            operation()
+            return
+        except api_exceptions.GoogleAPICallError as exc:
+            if attempt >= _BQ_WRITE_MAX_RETRIES or not _is_retryable_bq_error(exc):
+                raise
+            sleep_for = delay + random.uniform(0, 1)
+            logger.warning(
+                f"BigQuery rate/transient error on {description} "
+                f"(attempt {attempt}/{_BQ_WRITE_MAX_RETRIES}): {exc}. "
+                f"Retrying in {sleep_for:.1f}s"
+            )
+            time.sleep(sleep_for)
+            delay = min(delay * _RETRY_MULTIPLIER, _RETRY_MAX_DELAY)
 
 
 @dataclass(frozen=True)
@@ -1094,7 +1171,12 @@ def carry_forward_snapshot(
                 bigquery.ScalarQueryParameter("repo", "STRING", repo),
             ]
         )
-        client.query(dml, job_config=job_config).result()
+        _retry_bigquery_write(
+            lambda dml=dml, job_config=job_config: client.query(
+                dml, job_config=job_config
+            ).result(),
+            description=f"carry-forward INSERT into {table} for {repo}",
+        )
         logger.info(
             f"Carried forward {table} rows for {repo} from {prior_date} to {snapshot_date}"
         )
@@ -1136,13 +1218,18 @@ def _insert_rows_to_table(
             write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
             source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
         )
-        load_job = client.load_table_from_json(rows, table_ref, job_config=job_config)
-        load_job.result()
 
-        if load_job.errors:
-            error_msg = f"BigQuery load errors for table {table}: {load_job.errors}"
-            logger.error(error_msg)
-            raise Exception(error_msg)
+        def _run_load() -> None:
+            load_job = client.load_table_from_json(
+                rows, table_ref, job_config=job_config
+            )
+            load_job.result()
+            if load_job.errors:
+                error_msg = f"BigQuery load errors for table {table}: {load_job.errors}"
+                logger.error(error_msg)
+                raise Exception(error_msg)
+
+        _retry_bigquery_write(_run_load, description=f"load into {table}")
 
 
 def load_data(
@@ -1281,7 +1368,12 @@ def reconcile_delta(
                     bigquery.ScalarQueryParameter("repo", "STRING", repo),
                 ]
             )
-            client.query(dml, job_config=job_config).result()
+            _retry_bigquery_write(
+                lambda dml=dml, job_config=job_config: client.query(
+                    dml, job_config=job_config
+                ).result(),
+                description=f"reconcile DELETE from {table} for {repo}",
+            )
         logger.info(
             f"Reconciled {table}: removed prior rows for {len(pr_ids)} changed PR(s) "
             f"for {repo} on {snapshot_date}"
@@ -1511,6 +1603,40 @@ def process_repo(
         watermark = None
         logger.info(f"[{repo}] Full export ({reason})")
         processed = 0
+
+        # Accumulate transformed rows across chunks and flush in batches of
+        # _FULL_EXPORT_FLUSH_PRS PRs. This collapses what used to be one load job
+        # per 100-PR chunk into far fewer, larger loads, keeping the shared tables
+        # under BigQuery's per-table modification rate limit, while the flush
+        # threshold caps how much a large repo holds in memory at once.
+        def _empty_batch() -> dict:
+            return {
+                "pull_requests": [],
+                "commits": [],
+                "reviewers": [],
+                "comments": [],
+            }
+
+        pending: dict = _empty_batch()
+        pending_prs = 0
+
+        def _flush_pending() -> None:
+            # Rebind a fresh dict rather than clearing the one just handed to
+            # load_data: load_data holds the reference while it loads, so mutating
+            # it here would be a footgun.
+            nonlocal pending, pending_prs
+            if pending_prs == 0:
+                return
+            load_data(
+                bigquery_client,
+                bigquery_dataset,
+                pending,
+                snapshot_date,
+                use_streaming_insert=use_streaming_insert,
+            )
+            pending = _empty_batch()
+            pending_prs = 0
+
         for chunk_count, chunk in enumerate(
             extract_pull_requests(
                 session,
@@ -1525,17 +1651,16 @@ def process_repo(
                 f"[{repo}] Processing chunk {chunk_count} with {len(chunk)} PRs"
             )
             transformed_data = transform_data(chunk, repo)
-            load_data(
-                bigquery_client,
-                bigquery_dataset,
-                transformed_data,
-                snapshot_date,
-                use_streaming_insert=use_streaming_insert,
-            )
+            for key in pending:
+                pending[key].extend(transformed_data.get(key, []))
             processed += len(chunk)
+            pending_prs += len(chunk)
             logger.info(
                 f"[{repo}] Completed chunk {chunk_count}. PRs processed for repo: {processed}"
             )
+            if pending_prs >= _FULL_EXPORT_FLUSH_PRS:
+                _flush_pending()
+        _flush_pending()
         return processed
 
     # Incremental path: baseline today from the prior snapshot, then overlay only
