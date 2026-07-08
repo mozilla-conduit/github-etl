@@ -141,14 +141,9 @@ def _is_retryable_bq_error(exc: api_exceptions.GoogleAPICallError) -> bool:
     Inspects the error's structured ``reason`` codes (a 403 rateLimitExceeded and
     the 429/5xx server faults are retryable). A daily-quota exhaustion is not.
     """
-    if isinstance(
-        exc,
-        (
-            api_exceptions.TooManyRequests,
-            api_exceptions.ServiceUnavailable,
-            api_exceptions.InternalServerError,
-        ),
-    ):
+    status = getattr(exc, "code", None)
+    status_code = status() if callable(status) else status
+    if status_code in _RETRYABLE_STATUS_CODES:
         return True
     for err in getattr(exc, "errors", None) or []:
         if isinstance(err, dict) and err.get("reason") in _RETRYABLE_BQ_REASONS:
