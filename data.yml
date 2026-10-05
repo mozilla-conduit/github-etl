@@ -24,6 +24,8 @@ projects:
               - name: labels
                 type: STRING
                 mode: REPEATED
+              - name: author_username
+                type: STRING
               - name: snapshot_date
                 type: DATE
           - id: commits
