@@ -157,6 +157,43 @@ def test_labels_empty_list():
     assert result["pull_requests"][0]["labels"] == []
 
 
+def test_pr_author_username_extraction():
+    """Test PR author login is extracted from the PR's user object."""
+    raw_data = [
+        {
+            "number": 1,
+            "title": "PR with author",
+            "state": "open",
+            "user": {"login": "octocat"},
+            "labels": [],
+            "commit_data": [],
+            "reviewer_data": [],
+            "comment_data": [],
+        }
+    ]
+
+    result = main.transform_data(raw_data, "mozilla/firefox")
+    assert result["pull_requests"][0]["author_username"] == "octocat"
+
+
+@pytest.mark.parametrize("extra", [{}, {"user": None}], ids=["absent", "null"])
+def test_pr_author_username_missing_user(extra: dict):
+    """Test PR author is None when the user object is null or absent."""
+    pr = {
+        "number": 1,
+        "title": "PR without author",
+        "state": "open",
+        "labels": [],
+        "commit_data": [],
+        "reviewer_data": [],
+        "comment_data": [],
+        **extra,
+    }
+
+    result = main.transform_data([pr], "mozilla/firefox")
+    assert result["pull_requests"][0]["author_username"] is None
+
+
 def test_commit_transformation():
     """Test commit fields mapping."""
     raw_data = [

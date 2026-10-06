@@ -91,6 +91,7 @@ _TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "date_landed",
         "date_approved",
         "labels",
+        "author_username",
     ),
     "commits": (
         "pull_request_id",
@@ -859,6 +860,7 @@ def transform_data(raw_data: list[dict], repo: str) -> dict:
                 if pr.get("labels")
                 else []
             ),
+            "author_username": (pr.get("user") or {}).get("login"),
         }
 
         # Extract and flatten commit data
