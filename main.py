@@ -22,10 +22,12 @@ from urllib.parse import parse_qs, urlparse
 
 import jwt
 import requests
+import sentry_sdk
 from google.api_core import exceptions as api_exceptions
 from google.api_core.client_options import ClientOptions
 from google.auth.credentials import AnonymousCredentials
 from google.cloud import bigquery
+from sentry_sdk.integrations.logging import LoggingIntegration
 
 BUG_RE = re.compile(r"\b(?:bug|b=)\s*#?(\d+)\b", re.I)
 
@@ -395,6 +397,25 @@ def setup_logging() -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
         force=True,
+    )
+
+
+def setup_sentry() -> None:
+    """
+    Report errors to Sentry when SENTRY_DSN is set; no-op otherwise.
+
+    logger.error/logger.exception calls become Sentry events and lower levels
+    are attached as breadcrumbs. SENTRY_ENVIRONMENT and SENTRY_RELEASE are read
+    from the environment by the SDK.
+    """
+    dsn = os.environ.get("SENTRY_DSN")
+    if not dsn:
+        return
+    sentry_sdk.init(
+        dsn=dsn,
+        integrations=[
+            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR)
+        ],
     )
 
 
@@ -1722,11 +1743,19 @@ def main() -> int:
     4. Repeat until no more data
     """
     setup_logging()
+    setup_sentry()
     try:
         return _main()
     except RuntimeError as e:
-        logger.error(str(e))
+        logger.exception(str(e))
         return 1
+    except SystemExit as e:
+        # Missing configuration: report it, then still fail the run.
+        sentry_sdk.capture_message(str(e), level="fatal")
+        raise
+    finally:
+        # The process exits right after this; send queued events first.
+        sentry_sdk.flush()
 
 
 def _main() -> int:
@@ -1835,7 +1864,10 @@ def _main() -> int:
                 # failed repo rather than propagating out of the executor and
                 # discarding the results of other in-flight repos. logger.exception
                 # records the worker thread's traceback for debugging in CI/prod.
-                logger.exception(f"Failed to process repo {repo}: {exc}")
+                # The Sentry event is tagged with the repo for filtering.
+                with sentry_sdk.new_scope() as scope:
+                    scope.set_tag("repo", repo)
+                    logger.exception(f"Failed to process repo {repo}: {exc}")
                 failed_repos.append(repo)
                 continue
             total_processed += processed
@@ -1844,10 +1876,12 @@ def _main() -> int:
             )
 
     if failed_repos:
-        logger.error(
+        # Per-repo failures were already reported to Sentry above. Exit 0 so a
+        # partial failure does not mark the cron job as failed.
+        logger.warning(
             f"ETL completed with failures. Failed repos: {', '.join(failed_repos)}"
         )
-        return 1
+        return 0
 
     logger.info(
         f"GitHub ETL process completed successfully. Total PRs processed: {total_processed}"
