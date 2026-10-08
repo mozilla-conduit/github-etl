@@ -400,23 +400,30 @@ def setup_logging() -> None:
     )
 
 
-def setup_sentry() -> None:
+def setup_sentry() -> bool:
     """
     Report errors to Sentry when SENTRY_DSN is set; no-op otherwise.
 
     logger.error/logger.exception calls become Sentry events and lower levels
     are attached as breadcrumbs. SENTRY_ENVIRONMENT and SENTRY_RELEASE are read
     from the environment by the SDK.
+
+    Returns:
+        True if Sentry was initialized, False if SENTRY_DSN is unset.
     """
     dsn = os.environ.get("SENTRY_DSN")
     if not dsn:
-        return
+        return False
     sentry_sdk.init(
         dsn=dsn,
         integrations=[
             LoggingIntegration(level=logging.INFO, event_level=logging.ERROR)
         ],
+        # Tracebacks pass through frames holding the GitHub private key, app JWT
+        # and installation tokens; never ship frame locals to Sentry.
+        include_local_variables=False,
     )
+    return True
 
 
 def _parse_github_timestamp(value: str | None) -> datetime | None:
@@ -1732,6 +1739,25 @@ def process_repo(
     return processed
 
 
+def _process_repo_in_sentry_scope(repo: str, *args, **kwargs) -> int:
+    """
+    Run process_repo for *repo* inside its own Sentry isolation scope.
+
+    Runs in the worker thread so the retry/backoff warnings logged while
+    processing the repo are attached as breadcrumbs to the failure event (Sentry
+    scopes are per-thread, and pool threads are reused across repos). The event
+    is tagged with the repo for filtering. Exceptions are logged then re-raised
+    so the caller can record the repo as failed.
+    """
+    with sentry_sdk.isolation_scope() as scope:
+        scope.set_tag("repo", repo)
+        try:
+            return process_repo(repo, *args, **kwargs)
+        except Exception as exc:
+            logger.exception(f"Failed to process repo {repo}: {exc}")
+            raise
+
+
 def main() -> int:
     """
     Main ETL process with chunked processing.
@@ -1743,9 +1769,9 @@ def main() -> int:
     4. Repeat until no more data
     """
     setup_logging()
-    setup_sentry()
+    sentry_enabled = setup_sentry()
     try:
-        return _main()
+        return _main(sentry_enabled)
     except RuntimeError as e:
         logger.exception(str(e))
         return 1
@@ -1758,7 +1784,7 @@ def main() -> int:
         sentry_sdk.flush()
 
 
-def _main() -> int:
+def _main(sentry_enabled: bool = False) -> int:
     logger.info("Starting GitHub ETL process with chunked processing")
 
     github_app_id = os.environ.get("GITHUB_APP_ID") or None
@@ -1839,7 +1865,7 @@ def _main() -> int:
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_repo = {
             executor.submit(
-                process_repo,
+                _process_repo_in_sentry_scope,
                 repo,
                 github_app_id,
                 github_private_key,
@@ -1858,16 +1884,12 @@ def _main() -> int:
             repo = future_to_repo[future]
             try:
                 processed = future.result()
-            except Exception as exc:
+            except Exception:
                 # Catch broadly so one repo's failure (a TooManyRetriesError, a
                 # RuntimeError, or a bare Exception from load_data) is recorded as a
                 # failed repo rather than propagating out of the executor and
-                # discarding the results of other in-flight repos. logger.exception
-                # records the worker thread's traceback for debugging in CI/prod.
-                # The Sentry event is tagged with the repo for filtering.
-                with sentry_sdk.new_scope() as scope:
-                    scope.set_tag("repo", repo)
-                    logger.exception(f"Failed to process repo {repo}: {exc}")
+                # discarding the results of other in-flight repos. The worker has
+                # already logged/reported it (see _process_repo_in_sentry_scope).
                 failed_repos.append(repo)
                 continue
             total_processed += processed
@@ -1876,12 +1898,13 @@ def _main() -> int:
             )
 
     if failed_repos:
-        # Per-repo failures were already reported to Sentry above. Exit 0 so a
-        # partial failure does not mark the cron job as failed.
         logger.warning(
             f"ETL completed with failures. Failed repos: {', '.join(failed_repos)}"
         )
-        return 0
+        # With Sentry configured, per-repo failures were reported there, so exit 0
+        # to avoid marking the cron job as failed. Without it, the exit code is the
+        # only signal, so fail the run.
+        return 0 if sentry_enabled else 1
 
     logger.info(
         f"GitHub ETL process completed successfully. Total PRs processed: {total_processed}"

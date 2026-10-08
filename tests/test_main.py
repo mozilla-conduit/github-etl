@@ -540,7 +540,7 @@ def test_repo_failure_continues_to_next_repo(
     ):
         result = main.main()
 
-    assert result == 0  # partial failure is reported to Sentry, not the exit code
+    assert result == 1  # no SENTRY_DSN, so the exit code must signal the failure
     assert mock_extract.call_count == 2  # both repos were attempted
     mock_load.assert_called_once()  # only the successful repo loaded data
 
@@ -562,7 +562,7 @@ def test_bare_exception_on_one_repo_is_isolated(
     """A bare Exception (e.g. from load_data) on one repo must not abort the others.
 
     The executor catches broadly, so the failing repo is recorded in failed_repos
-    (reported to Sentry, overall exit code 0) while the healthy repo still completes its load.
+    (exit code 1 without SENTRY_DSN) while the healthy repo still completes its load.
     """
     # Fresh iterator per repo (a shared return_value iterator would be exhausted
     # by whichever repo consumes it first).
@@ -597,7 +597,7 @@ def test_bare_exception_on_one_repo_is_isolated(
     ):
         result = main.main()
 
-    assert result == 0  # partial failure recorded, run did not abort
+    assert result == 1  # partial failure recorded, run did not abort
     assert mock_extract.call_count == 2  # both repos were attempted
     assert mock_load.call_count == 2  # both repos reached the load step
 
@@ -614,13 +614,15 @@ def test_repo_failure_is_tagged_for_sentry(
     mock_setup_logging,
     mock_sentry,
 ):
-    """A failed repo is reported under a Sentry scope tagged with the repo name."""
+    """A failed repo is reported under a Sentry scope tagged with the repo name,
+    and the run exits 0 because Sentry is configured."""
     mock_extract.side_effect = main.TooManyRetriesError("GitHub API error 502")
-    scope = mock_sentry.new_scope.return_value.__enter__.return_value
+    scope = mock_sentry.isolation_scope.return_value.__enter__.return_value
 
     with patch.dict(
         os.environ,
         {
+            "SENTRY_DSN": "https://key@o0.ingest.sentry.io/0",
             "GITHUB_REPOS": "mozilla/firefox",
             "BIGQUERY_PROJECT": "test",
             "BIGQUERY_DATASET": "test",
@@ -662,16 +664,24 @@ class TestSetupSentry:
     @patch("main.sentry_sdk.init")
     def test_noop_without_dsn(self, mock_init):
         with patch.dict(os.environ, {}, clear=True):
-            main.setup_sentry()
+            assert main.setup_sentry() is False
         mock_init.assert_not_called()
 
     @patch("main.sentry_sdk.init")
     def test_initializes_with_dsn(self, mock_init):
         dsn = "https://key@o0.ingest.sentry.io/0"
         with patch.dict(os.environ, {"SENTRY_DSN": dsn}, clear=True):
-            main.setup_sentry()
+            assert main.setup_sentry() is True
         mock_init.assert_called_once()
         assert mock_init.call_args.kwargs["dsn"] == dsn
+
+    @patch("main.sentry_sdk.init")
+    def test_does_not_send_local_variables(self, mock_init):
+        """Frame locals hold the private key, JWT and tokens; never send them."""
+        dsn = "https://key@o0.ingest.sentry.io/0"
+        with patch.dict(os.environ, {"SENTRY_DSN": dsn}, clear=True):
+            main.setup_sentry()
+        assert mock_init.call_args.kwargs["include_local_variables"] is False
 
 
 class TestResolveMaxWorkers:
