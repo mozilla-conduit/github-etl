@@ -364,12 +364,12 @@ def get_installation_access_token(
                 expected_status=201,
             )
 
+            # Never include resp.text in these errors: the body may carry the
+            # token, and error messages are reported to Sentry.
             try:
                 data = resp.json()
             except requests.exceptions.JSONDecodeError as e:
-                raise RuntimeError(
-                    f"Failed to parse access token response: {e}: {resp.text}"
-                )
+                raise RuntimeError(f"Failed to parse access token response: {e}")
             try:
                 access_token = AccessToken(
                     token=data["token"],
@@ -377,7 +377,8 @@ def get_installation_access_token(
                 )
             except KeyError as e:
                 raise RuntimeError(
-                    f"Unexpected access token response structure, missing key {e}: {resp.text}"
+                    f"Unexpected access token response structure, missing key {e}; "
+                    f"keys present: {sorted(data)}"
                 )
             except ValueError as e:
                 raise RuntimeError(
@@ -404,9 +405,10 @@ def setup_sentry() -> bool:
     """
     Report errors to Sentry when SENTRY_DSN is set; no-op otherwise.
 
-    logger.error/logger.exception calls become Sentry events and lower levels
-    are attached as breadcrumbs. SENTRY_ENVIRONMENT and SENTRY_RELEASE are read
-    from the environment by the SDK.
+    Log records at INFO and above are attached as breadcrumbs only; events are
+    sent explicitly with sentry_sdk.capture_exception/capture_message so each
+    failure is reported exactly once (several paths log an error and then raise).
+    SENTRY_ENVIRONMENT and SENTRY_RELEASE are read from the environment by the SDK.
 
     Returns:
         True if Sentry was initialized, False if SENTRY_DSN is unset.
@@ -416,9 +418,7 @@ def setup_sentry() -> bool:
         return False
     sentry_sdk.init(
         dsn=dsn,
-        integrations=[
-            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR)
-        ],
+        integrations=[LoggingIntegration(level=logging.INFO, event_level=None)],
         # Tracebacks pass through frames holding the GitHub private key, app JWT
         # and installation tokens; never ship frame locals to Sentry.
         include_local_variables=False,
@@ -1746,8 +1746,8 @@ def _process_repo_in_sentry_scope(repo: str, *args, **kwargs) -> int:
     Runs in the worker thread so the retry/backoff warnings logged while
     processing the repo are attached as breadcrumbs to the failure event (Sentry
     scopes are per-thread, and pool threads are reused across repos). The event
-    is tagged with the repo for filtering. Exceptions are logged then re-raised
-    so the caller can record the repo as failed.
+    is tagged with the repo for filtering. Exceptions are logged, reported, then
+    re-raised so the caller can record the repo as failed.
     """
     with sentry_sdk.isolation_scope() as scope:
         scope.set_tag("repo", repo)
@@ -1755,6 +1755,7 @@ def _process_repo_in_sentry_scope(repo: str, *args, **kwargs) -> int:
             return process_repo(repo, *args, **kwargs)
         except Exception as exc:
             logger.exception(f"Failed to process repo {repo}: {exc}")
+            sentry_sdk.capture_exception(exc)
             raise
 
 
@@ -1774,6 +1775,7 @@ def main() -> int:
         return _main(sentry_enabled)
     except RuntimeError as e:
         logger.exception(str(e))
+        sentry_sdk.capture_exception(e)
         return 1
     except SystemExit as e:
         # Missing configuration: report it, then still fail the run.

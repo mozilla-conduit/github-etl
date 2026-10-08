@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 from unittest.mock import MagicMock, Mock, patch
@@ -633,6 +634,8 @@ def test_repo_failure_is_tagged_for_sentry(
 
     assert result == 0
     scope.set_tag.assert_called_once_with("repo", "mozilla/firefox")
+    # Reported exactly once, even though the failure is also logged.
+    mock_sentry.capture_exception.assert_called_once()
     mock_sentry.flush.assert_called_once()
 
 
@@ -655,6 +658,7 @@ def test_missing_config_is_reported_and_still_fails(mock_setup_logging, mock_sen
 def test_runtime_error_still_fails(mock_main, mock_setup_logging, mock_sentry):
     """A top-level RuntimeError still returns a non-zero exit code."""
     assert main.main() == 1
+    mock_sentry.capture_exception.assert_called_once()
     mock_sentry.flush.assert_called_once()
 
 
@@ -682,6 +686,17 @@ class TestSetupSentry:
         with patch.dict(os.environ, {"SENTRY_DSN": dsn}, clear=True):
             main.setup_sentry()
         assert mock_init.call_args.kwargs["include_local_variables"] is False
+
+    @patch("main.LoggingIntegration")
+    @patch("main.sentry_sdk.init")
+    def test_logs_are_breadcrumbs_only(self, mock_init, mock_logging_integration):
+        """Log records must not become events; failures are captured explicitly."""
+        dsn = "https://key@o0.ingest.sentry.io/0"
+        with patch.dict(os.environ, {"SENTRY_DSN": dsn}, clear=True):
+            main.setup_sentry()
+        mock_logging_integration.assert_called_once_with(
+            level=logging.INFO, event_level=None
+        )
 
 
 class TestResolveMaxWorkers:

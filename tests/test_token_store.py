@@ -6,10 +6,15 @@ Covers:
     when X-RateLimit-Remaining is 0.
   - TokenStore: caches valid tokens, expires tokens within the 60s skew window,
     and hands out a stable per-installation lock.
+  - get_installation_access_token: error messages for malformed token responses
+    never include the response body (it may carry the token).
 """
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
+
+import pytest
+import requests
 
 import main
 from main import AccessToken, TokenStore, _is_rate_limited
@@ -82,3 +87,30 @@ def test_token_store_lock_is_stable_per_installation():
 
 def test_module_level_token_store_exists():
     assert isinstance(main.token_store, TokenStore)
+
+
+@pytest.mark.parametrize(
+    "json_side_effect",
+    [
+        # Token present but expires_at missing.
+        [{"token": "ghs_secret"}],
+        # Body is not valid JSON.
+        requests.exceptions.JSONDecodeError("bad", '{"token": "ghs_secret"', 0),
+    ],
+)
+def test_access_token_errors_do_not_leak_response_body(json_side_effect):
+    """Error messages reach Sentry, so they must never contain the token."""
+    resp = Mock()
+    resp.json.side_effect = json_side_effect
+    resp.text = '{"token": "ghs_secret"'
+
+    with (
+        patch("main._build_session", return_value=MagicMock()),
+        patch("main.github_request", return_value=resp),
+        patch("main.token_store", TokenStore()),
+        patch.dict(main.repo_installation_cache, {"mozilla/firefox": 1}),
+    ):
+        with pytest.raises(RuntimeError) as excinfo:
+            main.get_installation_access_token("jwt", "mozilla/firefox", "https://api")
+
+    assert "ghs_secret" not in str(excinfo.value)
