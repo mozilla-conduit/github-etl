@@ -1,8 +1,11 @@
+import logging
 import os
 import threading
+import uuid
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+import sentry_sdk
 
 import main
 
@@ -540,7 +543,7 @@ def test_repo_failure_continues_to_next_repo(
     ):
         result = main.main()
 
-    assert result == 1  # partial failure
+    assert result == 1  # no SENTRY_DSN, so the exit code must signal the failure
     assert mock_extract.call_count == 2  # both repos were attempted
     mock_load.assert_called_once()  # only the successful repo loaded data
 
@@ -562,7 +565,7 @@ def test_bare_exception_on_one_repo_is_isolated(
     """A bare Exception (e.g. from load_data) on one repo must not abort the others.
 
     The executor catches broadly, so the failing repo is recorded in failed_repos
-    (overall exit code 1) while the healthy repo still completes its load.
+    (exit code 1 without SENTRY_DSN) while the healthy repo still completes its load.
     """
     # Fresh iterator per repo (a shared return_value iterator would be exhausted
     # by whichever repo consumes it first).
@@ -600,6 +603,137 @@ def test_bare_exception_on_one_repo_is_isolated(
     assert result == 1  # partial failure recorded, run did not abort
     assert mock_extract.call_count == 2  # both repos were attempted
     assert mock_load.call_count == 2  # both repos reached the load step
+
+
+@patch("main.sentry_sdk")
+@patch("main.setup_logging")
+@patch("main.bigquery.Client")
+@patch("requests.Session")
+@patch("main.extract_pull_requests")
+def test_repo_failure_is_tagged_for_sentry(
+    mock_extract,
+    mock_session_class,
+    mock_bq_client,
+    mock_setup_logging,
+    mock_sentry,
+):
+    """A failed repo is reported under a Sentry scope tagged with the repo name,
+    and the run exits 0 because Sentry is configured."""
+    mock_extract.side_effect = main.TooManyRetriesError("GitHub API error 502")
+    scope = mock_sentry.isolation_scope.return_value.__enter__.return_value
+
+    with patch.dict(
+        os.environ,
+        {
+            "SENTRY_DSN": "https://key@o0.ingest.sentry.io/0",
+            "GITHUB_REPOS": "mozilla/firefox",
+            "BIGQUERY_PROJECT": "test",
+            "BIGQUERY_DATASET": "test",
+        },
+        clear=True,
+    ):
+        result = main.main()
+
+    assert result == 0
+    scope.set_tag.assert_called_once_with("repo", "mozilla/firefox")
+    # Reported exactly once, even though the failure is also logged.
+    mock_sentry.capture_exception.assert_called_once()
+    mock_sentry.flush.assert_called_once()
+
+
+@patch("main.sentry_sdk")
+@patch("main.setup_logging")
+def test_missing_config_is_reported_and_still_fails(mock_setup_logging, mock_sentry):
+    """Missing required env vars are sent to Sentry and still exit non-zero."""
+    with patch.dict(os.environ, {}, clear=True):
+        with pytest.raises(SystemExit):
+            main.main()
+
+    mock_sentry.capture_message.assert_called_once()
+    assert "BIGQUERY_PROJECT" in mock_sentry.capture_message.call_args.args[0]
+    mock_sentry.flush.assert_called_once()
+
+
+@patch("main.sentry_sdk")
+@patch("main.setup_logging")
+@patch("main._main", side_effect=RuntimeError("token exchange failed"))
+def test_runtime_error_still_fails(mock_main, mock_setup_logging, mock_sentry):
+    """A top-level RuntimeError still returns a non-zero exit code."""
+    assert main.main() == 1
+    mock_sentry.capture_exception.assert_called_once()
+    mock_sentry.flush.assert_called_once()
+
+
+class TestSetupSentry:
+    """Tests for setup_sentry initialization."""
+
+    @patch("main.sentry_sdk.init")
+    def test_noop_without_dsn(self, mock_init):
+        with patch.dict(os.environ, {}, clear=True):
+            assert main.setup_sentry() is False
+        mock_init.assert_not_called()
+
+    @patch("main.sentry_sdk.init")
+    def test_initializes_with_dsn(self, mock_init):
+        dsn = "https://key@o0.ingest.sentry.io/0"
+        with patch.dict(os.environ, {"SENTRY_DSN": dsn}, clear=True):
+            assert main.setup_sentry() is True
+        mock_init.assert_called_once()
+        assert mock_init.call_args.kwargs["dsn"] == dsn
+
+    def test_does_not_send_local_variables(self):
+        """Frame locals hold the private key, JWT and tokens. Never send them."""
+        # Generated at runtime so it can't leak via source context lines,
+        # only via frame locals.
+        secret = uuid.uuid4().hex
+        events = []
+
+        class CapturingTransport(sentry_sdk.transport.Transport):
+            def capture_envelope(self, envelope):
+                events.append(envelope.get_event())
+
+        real_init = sentry_sdk.init
+
+        def init_with_capturing_transport(*args, **kwargs):
+            return real_init(*args, transport=CapturingTransport(), **kwargs)
+
+        def fail_with_secret_in_scope():
+            private_key = secret  # noqa: F841
+            raise RuntimeError("token exchange failed")
+
+        dsn = "https://key@o0.ingest.sentry.io/0"
+        try:
+            with (
+                patch.dict(os.environ, {"SENTRY_DSN": dsn}, clear=True),
+                patch(
+                    "main.sentry_sdk.init", side_effect=init_with_capturing_transport
+                ),
+            ):
+                assert main.setup_sentry() is True
+                try:
+                    fail_with_secret_in_scope()
+                except RuntimeError:
+                    sentry_sdk.capture_exception()
+        finally:
+            sentry_sdk.get_client().close()
+            sentry_sdk.get_global_scope().set_client(None)
+
+        assert len(events) == 1
+        frames = events[0]["exception"]["values"][-1]["stacktrace"]["frames"]
+        assert any(f["function"] == "fail_with_secret_in_scope" for f in frames)
+        assert all("vars" not in f for f in frames)
+        assert secret not in repr(events[0])
+
+    @patch("main.LoggingIntegration")
+    @patch("main.sentry_sdk.init")
+    def test_logs_are_breadcrumbs_only(self, mock_init, mock_logging_integration):
+        """Log records must not become events; failures are captured explicitly."""
+        dsn = "https://key@o0.ingest.sentry.io/0"
+        with patch.dict(os.environ, {"SENTRY_DSN": dsn}, clear=True):
+            main.setup_sentry()
+        mock_logging_integration.assert_called_once_with(
+            level=logging.INFO, event_level=None
+        )
 
 
 class TestResolveMaxWorkers:
