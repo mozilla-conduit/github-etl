@@ -1,9 +1,11 @@
 import logging
 import os
 import threading
+import uuid
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+import sentry_sdk
 
 import main
 
@@ -679,13 +681,48 @@ class TestSetupSentry:
         mock_init.assert_called_once()
         assert mock_init.call_args.kwargs["dsn"] == dsn
 
-    @patch("main.sentry_sdk.init")
-    def test_does_not_send_local_variables(self, mock_init):
-        """Frame locals hold the private key, JWT and tokens; never send them."""
+    def test_does_not_send_local_variables(self):
+        """Frame locals hold the private key, JWT and tokens. Never send them."""
+        # Generated at runtime so it can't leak via source context lines,
+        # only via frame locals.
+        secret = uuid.uuid4().hex
+        events = []
+
+        class CapturingTransport(sentry_sdk.transport.Transport):
+            def capture_envelope(self, envelope):
+                events.append(envelope.get_event())
+
+        real_init = sentry_sdk.init
+
+        def init_with_capturing_transport(*args, **kwargs):
+            return real_init(*args, transport=CapturingTransport(), **kwargs)
+
+        def fail_with_secret_in_scope():
+            private_key = secret  # noqa: F841
+            raise RuntimeError("token exchange failed")
+
         dsn = "https://key@o0.ingest.sentry.io/0"
-        with patch.dict(os.environ, {"SENTRY_DSN": dsn}, clear=True):
-            main.setup_sentry()
-        assert mock_init.call_args.kwargs["include_local_variables"] is False
+        try:
+            with (
+                patch.dict(os.environ, {"SENTRY_DSN": dsn}, clear=True),
+                patch(
+                    "main.sentry_sdk.init", side_effect=init_with_capturing_transport
+                ),
+            ):
+                assert main.setup_sentry() is True
+                try:
+                    fail_with_secret_in_scope()
+                except RuntimeError:
+                    sentry_sdk.capture_exception()
+        finally:
+            sentry_sdk.get_client().close()
+            sentry_sdk.get_global_scope().set_client(None)
+
+        assert len(events) == 1
+        frames = events[0]["exception"]["values"][-1]["stacktrace"]["frames"]
+        assert any(f["function"] == "fail_with_secret_in_scope" for f in frames)
+        assert all("vars" not in f for f in frames)
+        assert secret not in repr(events[0])
 
     @patch("main.LoggingIntegration")
     @patch("main.sentry_sdk.init")
